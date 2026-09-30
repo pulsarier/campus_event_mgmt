@@ -6,26 +6,10 @@ import jwt from 'jsonwebtoken'
 const roles = new Set(['student', 'faculty', 'organizer', 'admin'])
 const jwtIssuer = 'campus-events'
 
-export function createAuthRouter(pool, jwtSecret) {
+export function createAccessControl(pool, jwtSecret) {
   if (typeof jwtSecret !== 'string' || Buffer.byteLength(jwtSecret) < 32) {
     throw new Error('JWT_SECRET must contain at least 32 bytes')
   }
-
-  const router = express.Router()
-  const authLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    message: { error: 'Too many authentication attempts. Try again later.' },
-  })
-
-  const issueToken = (userId) => jwt.sign(
-    { sub: String(userId) },
-    jwtSecret,
-    { algorithm: 'HS256', expiresIn: '1h', issuer: jwtIssuer, audience: jwtIssuer },
-  )
-
   async function authenticate(request, response, next) {
     const authorization = request.get('authorization') ?? ''
     const match = /^Bearer\s+(.+)$/i.exec(authorization)
@@ -60,6 +44,29 @@ export function createAuthRouter(pool, jwtSecret) {
     return next()
   }
 
+  return { authenticate, authorize }
+}
+
+export function createAuthRouter(pool, jwtSecret) {
+  if (typeof jwtSecret !== 'string' || Buffer.byteLength(jwtSecret) < 32) {
+    throw new Error('JWT_SECRET must contain at least 32 bytes')
+  }
+
+  const router = express.Router()
+  const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Too many authentication attempts. Try again later.' },
+  })
+  const { authenticate, authorize } = createAccessControl(pool, jwtSecret)
+  const issueToken = (userId) => jwt.sign(
+    { sub: String(userId) },
+    jwtSecret,
+    { algorithm: 'HS256', expiresIn: '1h', issuer: jwtIssuer, audience: jwtIssuer },
+  )
+
   router.post('/register', authLimiter, async (request, response) => {
     const { name, email, password, role = 'student', department = '' } = request.body ?? {}
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : ''
@@ -75,8 +82,8 @@ export function createAuthRouter(pool, jwtSecret) {
     if (passwordBytes < 12 || passwordBytes > 72) {
       return response.status(400).json({ error: 'Password must be between 12 and 72 UTF-8 bytes' })
     }
-    if (!['student', 'faculty'].includes(role)) {
-      return response.status(403).json({ error: 'This role cannot be self-registered' })
+    if (role !== 'student') {
+      return response.status(403).json({ error: 'Only student accounts can self-register; staff roles must be assigned by an administrator' })
     }
     if (typeof department !== 'string' || department.length > 120) {
       return response.status(400).json({ error: 'Invalid department' })

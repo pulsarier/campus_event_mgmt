@@ -2,13 +2,14 @@ import 'dotenv/config'
 import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
-import { createAuthRouter } from './auth.js'
+import { createAccessControl, createAuthRouter } from './auth.js'
 
 const { Pool } = pg
 const port = Number(process.env.API_PORT ?? 3001)
 const allowedOrigins = (process.env.CLIENT_ORIGINS ?? 'http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174').split(',')
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const app = express()
+const { authenticate, authorize } = createAccessControl(pool, process.env.JWT_SECRET)
 
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)) }))
 app.use(express.json({ limit: '32kb' }))
@@ -17,6 +18,16 @@ app.use('/api/auth', createAuthRouter(pool, process.env.JWT_SECRET))
 app.get('/api/health', async (_request, response) => {
   await pool.query('SELECT 1')
   response.json({ status: 'ok', database: 'connected' })
+})
+
+app.get('/api/venues', async (_request, response) => {
+  const result = await pool.query(
+    `SELECT venue_id AS id, venue_name AS name, location, capacity
+       FROM venues
+      WHERE availability = true
+      ORDER BY venue_name`,
+  )
+  response.json({ data: result.rows })
 })
 
 app.get('/api/events', async (request, response) => {
@@ -38,6 +49,37 @@ app.get('/api/events', async (request, response) => {
     search ? [search, values[0]] : ['', ''],
   )
   response.json({ data: result.rows })
+})
+
+app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const { title, description = '', category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
+  const cleanTitle = typeof title === 'string' ? title.trim() : ''
+  const cleanDescription = typeof description === 'string' ? description.trim() : null
+  const allowedCategories = new Set(['Talks', 'Workshops', 'Sports', 'Exhibitions'])
+  const startDate = new Date(startsAt)
+  const endDate = new Date(endsAt)
+  const deadlineDate = new Date(deadline)
+  const numericVenueId = Number(venueId)
+  const numericCapacity = Number(capacity)
+
+  if (cleanTitle.length < 3 || cleanTitle.length > 180) return response.status(400).json({ error: 'Title must be between 3 and 180 characters' })
+  if (cleanDescription === null || cleanDescription.length > 10000) return response.status(400).json({ error: 'Description must be 10000 characters or fewer' })
+  if (!allowedCategories.has(category)) return response.status(400).json({ error: 'Invalid event category' })
+  if (![startDate, endDate, deadlineDate].every((date) => Number.isFinite(date.getTime())) || endDate <= startDate || deadlineDate > startDate) {
+    return response.status(400).json({ error: 'Provide valid event times and a registration deadline no later than the start time' })
+  }
+  if (!Number.isSafeInteger(numericVenueId) || numericVenueId < 1 || !Number.isSafeInteger(numericCapacity) || numericCapacity < 1) {
+    return response.status(400).json({ error: 'Select a valid venue and positive event capacity' })
+  }
+
+  const result = await pool.query(
+    `INSERT INTO events (title, description, category, starts_at, ends_at, registration_deadline, venue_id, organizer_id, capacity, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+     RETURNING event_id AS id, title, description, category, starts_at, ends_at,
+               registration_deadline, venue_id AS venue_id, capacity, status`,
+    [cleanTitle, cleanDescription, category, startDate.toISOString(), endDate.toISOString(), deadlineDate.toISOString(), numericVenueId, request.user.user_id, numericCapacity],
+  )
+  response.status(201).json({ data: result.rows[0] })
 })
 
 app.get('/api/events/:eventId', async (request, response) => {
@@ -62,8 +104,167 @@ app.get('/api/events/:eventId', async (request, response) => {
   response.json({ data: result.rows[0] })
 })
 
+app.get('/api/registrations/me', authenticate, async (request, response) => {
+  const result = await pool.query(
+    `SELECT r.event_id AS id, r.status AS registration_status,
+            e.title, e.category, e.starts_at, e.capacity,
+            v.venue_name AS venue, u.name AS organizer
+       FROM registrations r
+       JOIN events e ON e.event_id = r.event_id
+       JOIN venues v ON v.venue_id = e.venue_id
+       JOIN users u ON u.user_id = e.organizer_id
+      WHERE r.user_id = $1 AND r.status IN ('confirmed', 'waitlisted')
+      ORDER BY e.starts_at`,
+    [request.user.user_id],
+  )
+  response.json({ data: result.rows })
+})
+
+app.post('/api/events/:eventId/registrations', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const eventResult = await client.query(
+      'SELECT event_id, capacity, registration_deadline FROM events WHERE event_id = $1 AND status = $2 FOR UPDATE',
+      [eventId, 'approved'],
+    )
+    if (eventResult.rowCount !== 1) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Event not found' }) }
+    const event = eventResult.rows[0]
+    if (new Date(event.registration_deadline).getTime() < Date.now()) { await client.query('ROLLBACK'); return response.status(409).json({ error: 'Registration deadline has passed' }) }
+
+    const existing = await client.query(
+      'SELECT status FROM registrations WHERE event_id = $1 AND user_id = $2 FOR UPDATE',
+      [eventId, request.user.user_id],
+    )
+    if (existing.rowCount === 1 && existing.rows[0].status !== 'cancelled') {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'You are already registered for this event' })
+    }
+
+    const confirmed = await client.query(
+      `SELECT COUNT(*)::INTEGER AS count FROM registrations
+        WHERE event_id = $1 AND status = 'confirmed'`,
+      [eventId],
+    )
+    const status = confirmed.rows[0].count < event.capacity ? 'confirmed' : 'waitlisted'
+    const registration = existing.rowCount === 1
+      ? await client.query(
+        `UPDATE registrations SET status = $3, registration_date = now()
+          WHERE event_id = $1 AND user_id = $2
+          RETURNING registration_id, event_id, user_id, registration_date, status`,
+        [eventId, request.user.user_id, status],
+      )
+      : await client.query(
+        `INSERT INTO registrations (event_id, user_id, status)
+         VALUES ($1, $2, $3)
+         RETURNING registration_id, event_id, user_id, registration_date, status`,
+        [eventId, request.user.user_id, status],
+      )
+    await client.query('COMMIT')
+    return response.status(201).json({ data: registration.rows[0] })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
+app.delete('/api/events/:eventId/registrations/me', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const event = await client.query('SELECT event_id FROM events WHERE event_id = $1 FOR UPDATE', [eventId])
+    if (event.rowCount !== 1) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Event not found' }) }
+    const registration = await client.query(
+      'SELECT status FROM registrations WHERE event_id = $1 AND user_id = $2 FOR UPDATE',
+      [eventId, request.user.user_id],
+    )
+    if (registration.rowCount !== 1 || registration.rows[0].status === 'cancelled') {
+      await client.query('ROLLBACK')
+      return response.status(404).json({ error: 'Registration not found' })
+    }
+
+    const wasConfirmed = registration.rows[0].status === 'confirmed'
+    await client.query(
+      `UPDATE registrations SET status = 'cancelled'
+        WHERE event_id = $1 AND user_id = $2`,
+      [eventId, request.user.user_id],
+    )
+    let promoted = false
+    if (wasConfirmed) {
+      const next = await client.query(
+        `SELECT registration_id FROM registrations
+          WHERE event_id = $1 AND status = 'waitlisted'
+          ORDER BY registration_date, registration_id
+          LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        [eventId],
+      )
+      if (next.rowCount === 1) {
+        await client.query(`UPDATE registrations SET status = 'confirmed' WHERE registration_id = $1`, [next.rows[0].registration_id])
+        promoted = true
+      }
+    }
+    await client.query('COMMIT')
+    return response.json({ data: { status: 'cancelled', waitlistedParticipantPromoted: promoted } })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/saved-events', authenticate, async (request, response) => {
+  const result = await pool.query(
+    `SELECT e.event_id AS id, e.title, e.category, e.starts_at,
+            v.venue_name AS venue, u.name AS organizer
+       FROM saved_events s
+       JOIN events e ON e.event_id = s.event_id
+       JOIN venues v ON v.venue_id = e.venue_id
+       JOIN users u ON u.user_id = e.organizer_id
+      WHERE s.user_id = $1 AND e.status = 'approved'
+      ORDER BY s.saved_at DESC`,
+    [request.user.user_id],
+  )
+  response.json({ data: result.rows })
+})
+
+app.post('/api/saved-events/:eventId', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const result = await pool.query(
+    `INSERT INTO saved_events (event_id, user_id)
+     SELECT event_id, $2 FROM events WHERE event_id = $1 AND status = 'approved'
+     ON CONFLICT (event_id, user_id) DO NOTHING
+     RETURNING event_id AS id`,
+    [eventId, request.user.user_id],
+  )
+  if (result.rowCount === 0) {
+    const exists = await pool.query('SELECT 1 FROM events WHERE event_id = $1 AND status = $2', [eventId, 'approved'])
+    if (exists.rowCount === 0) return response.status(404).json({ error: 'Event not found' })
+  }
+  response.status(201).json({ data: { id: eventId, saved: true } })
+})
+
+app.delete('/api/saved-events/:eventId', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  await pool.query('DELETE FROM saved_events WHERE event_id = $1 AND user_id = $2', [eventId, request.user.user_id])
+  response.status(204).end()
+})
+
 app.use((error, _request, response, _next) => {
   console.error('API request failed:', error.message)
+  if (error.code === '23P01') return response.status(409).json({ error: 'The venue or organizer already has an event at that time' })
+  if (error.code === 'P0001') return response.status(400).json({ error: error.message })
+  if (error.code === '23503' || error.code === '23514') return response.status(400).json({ error: 'The submitted event data is invalid' })
   response.status(500).json({ error: 'Internal server error' })
 })
 

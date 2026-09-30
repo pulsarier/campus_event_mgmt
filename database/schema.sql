@@ -89,6 +89,14 @@ CREATE TABLE registrations (
     UNIQUE (event_id, user_id)
 );
 
+CREATE TABLE saved_events (
+    saved_event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id BIGINT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    saved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (event_id, user_id)
+);
+
 CREATE TABLE attendance (
     attendance_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_id BIGINT NOT NULL REFERENCES events(event_id) ON DELETE CASCADE,
@@ -120,6 +128,7 @@ CREATE TABLE notifications (
 CREATE INDEX events_status_start_idx ON events(status, starts_at);
 CREATE INDEX events_category_idx ON events(category);
 CREATE INDEX registrations_user_status_idx ON registrations(user_id, status);
+CREATE INDEX saved_events_user_idx ON saved_events(user_id, saved_at DESC);
 CREATE INDEX attendance_event_idx ON attendance(event_id);
 CREATE INDEX feedback_event_idx ON feedback(event_id);
 CREATE INDEX notifications_user_unread_idx ON notifications(user_id, is_read) WHERE (is_read = false);
