@@ -26,7 +26,7 @@ export function createAccessControl(pool, jwtSecret) {
       }
 
       const result = await pool.query(
-        'SELECT user_id, name, email, role, department FROM users WHERE user_id = $1',
+        'SELECT user_id, name, email, role, department, event_reminders_enabled, announcements_enabled FROM users WHERE user_id = $1',
         [claims.sub],
       )
       if (result.rowCount !== 1) return response.status(401).json({ error: 'Invalid access token' })
@@ -111,7 +111,7 @@ export function createAuthRouter(pool, jwtSecret) {
     if (!email || !password) return response.status(400).json({ error: 'Email and password are required' })
 
     const result = await pool.query(
-      'SELECT user_id, name, email, role, department, password_hash FROM users WHERE email = $1',
+      'SELECT user_id, name, email, role, department, event_reminders_enabled, announcements_enabled, password_hash FROM users WHERE email = $1',
       [email],
     )
     const user = result.rows[0]
@@ -123,6 +123,32 @@ export function createAuthRouter(pool, jwtSecret) {
   })
 
   router.get('/me', authenticate, (request, response) => response.json({ data: request.user }))
+  router.patch('/me/preferences', authenticate, async (request, response) => {
+    const { name, email, department, event_reminders_enabled: remindersEnabled, announcements_enabled: announcementsEnabled } = request.body ?? {}
+    const cleanName = typeof name === 'string' ? name.trim() : ''
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : ''
+    if (cleanName.length < 2 || cleanName.length > 120) return response.status(400).json({ error: 'Name must be between 2 and 120 characters' })
+    if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return response.status(400).json({ error: 'A valid email address is required' })
+    if (typeof department !== 'string' || department.length > 120) return response.status(400).json({ error: 'Invalid department' })
+    if (typeof remindersEnabled !== 'boolean' || typeof announcementsEnabled !== 'boolean') {
+      return response.status(400).json({ error: 'Notification preferences must be boolean values' })
+    }
+    try {
+      const result = await pool.query(
+        `UPDATE users
+            SET name = $2, email = $3, department = $4,
+                event_reminders_enabled = $5, announcements_enabled = $6
+          WHERE user_id = $1
+          RETURNING user_id, name, email, role, department,
+                    event_reminders_enabled, announcements_enabled`,
+        [request.user.user_id, cleanName, normalizedEmail, department.trim(), remindersEnabled, announcementsEnabled],
+      )
+      return response.json({ data: result.rows[0] })
+    } catch (error) {
+      if (error.code === '23505') return response.status(409).json({ error: 'An account with this email already exists' })
+      throw error
+    }
+  })
   router.get('/admin/users', authenticate, authorize('admin'), async (_request, response) => {
     const result = await pool.query(
       'SELECT user_id, name, email, role, department, created_at FROM users ORDER BY created_at DESC',

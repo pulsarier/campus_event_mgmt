@@ -3,6 +3,7 @@ import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
 import { createAccessControl, createAuthRouter } from './auth.js'
+import { startReminderScheduler } from './reminders.js'
 
 const { Pool } = pg
 const port = Number(process.env.API_PORT ?? 3001)
@@ -14,6 +15,42 @@ const { authenticate, authorize } = createAccessControl(pool, process.env.JWT_SE
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)) }))
 app.use(express.json({ limit: '32kb' }))
 app.use('/api/auth', createAuthRouter(pool, process.env.JWT_SECRET))
+
+app.get('/api/notifications/me', authenticate, async (request, response) => {
+  const [notifications, unreadCount] = await Promise.all([
+    pool.query(
+      `SELECT notification_id AS id, event_id, message, notification_type, is_read, created_at
+         FROM notifications
+        WHERE user_id = $1
+        ORDER BY created_at DESC, notification_id DESC
+        LIMIT 100`,
+      [request.user.user_id],
+    ),
+    pool.query('SELECT COUNT(*)::INTEGER AS count FROM notifications WHERE user_id = $1 AND is_read = false', [request.user.user_id]),
+  ])
+  response.json({ data: { items: notifications.rows, unread_count: unreadCount.rows[0].count } })
+})
+
+app.patch('/api/notifications/read-all', authenticate, async (request, response) => {
+  const result = await pool.query(
+    'UPDATE notifications SET is_read = true WHERE user_id = $1 AND is_read = false',
+    [request.user.user_id],
+  )
+  response.json({ data: { updated: result.rowCount } })
+})
+
+app.patch('/api/notifications/:notificationId/read', authenticate, async (request, response) => {
+  const notificationId = Number(request.params.notificationId)
+  if (!Number.isSafeInteger(notificationId) || notificationId < 1) return response.status(400).json({ error: 'Invalid notification ID' })
+  const result = await pool.query(
+    `UPDATE notifications SET is_read = true
+      WHERE notification_id = $1 AND user_id = $2
+      RETURNING notification_id AS id, is_read`,
+    [notificationId, request.user.user_id],
+  )
+  if (result.rowCount !== 1) return response.status(404).json({ error: 'Notification not found' })
+  response.json({ data: result.rows[0] })
+})
 
 app.get('/api/health', async (_request, response) => {
   await pool.query('SELECT 1')
@@ -160,11 +197,18 @@ app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'or
       [eventId, cleanTitle, cleanDescription, category, startDate.toISOString(), endDate.toISOString(), deadlineDate.toISOString(), numericVenueId, numericCapacity],
     )
     if (scheduleChanged) {
+      await client.query(
+        `DELETE FROM notifications
+          WHERE event_id = $1 AND notification_type = 'event_reminder'`,
+        [eventId],
+      )
       const notification = `The time or venue for "${cleanTitle}" has changed. Please check the updated event details.`
       await client.query(
-        `INSERT INTO notifications (user_id, event_id, message)
-         SELECT user_id, $1, $2 FROM registrations
-          WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')`,
+        `INSERT INTO notifications (user_id, event_id, message, notification_type)
+         SELECT user_id, $1, $2, 'event_update' FROM registrations
+          JOIN users USING (user_id)
+          WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')
+            AND announcements_enabled = true`,
         [eventId, notification],
       )
     }
@@ -198,9 +242,16 @@ app.patch('/api/managed-events/:eventId/cancel', authenticate, authorize('facult
     }
     const cancelledEvent = event.rows[0]
     await client.query(
-      `INSERT INTO notifications (user_id, event_id, message)
-       SELECT user_id, $1, $2 FROM registrations
-        WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')`,
+      `DELETE FROM notifications
+        WHERE event_id = $1 AND notification_type = 'event_reminder'`,
+      [cancelledEvent.event_id],
+    )
+    await client.query(
+      `INSERT INTO notifications (user_id, event_id, message, notification_type)
+       SELECT user_id, $1, $2, 'event_cancelled' FROM registrations
+        JOIN users USING (user_id)
+        WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')
+          AND announcements_enabled = true`,
       [cancelledEvent.event_id, `The event "${cancelledEvent.title}" has been cancelled.`],
     )
     await client.query('COMMIT')
@@ -254,8 +305,10 @@ app.patch('/api/admin/events/:eventId/review', authenticate, authorize('admin'),
       ? `Your event "${reviewed.title}" has been approved and published.`
       : `Your event "${reviewed.title}" was not approved.`
     await client.query(
-      'INSERT INTO notifications (user_id, event_id, message) VALUES ($1, $2, $3)',
-      [reviewed.organizer_id, reviewed.event_id, message],
+      `INSERT INTO notifications (user_id, event_id, message, notification_type)
+       SELECT user_id, $2, $3, $4 FROM users
+        WHERE user_id = $1 AND announcements_enabled = true`,
+      [reviewed.organizer_id, reviewed.event_id, message, 'event_approval'],
     )
     await client.query('COMMIT')
     return response.json({ data: { id: reviewed.event_id, status: reviewed.status } })
@@ -456,9 +509,11 @@ app.use((error, _request, response, _next) => {
 const server = app.listen(port, '127.0.0.1', () => {
   console.log(`Campus Events API listening on http://127.0.0.1:${port}`)
 })
+const stopReminderScheduler = startReminderScheduler(pool)
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => server.close(async () => {
+    stopReminderScheduler()
     await pool.end()
     process.exit(0)
   }))

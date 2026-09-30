@@ -7,6 +7,8 @@ CREATE TABLE users (
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('student', 'faculty', 'organizer', 'admin')),
     department TEXT,
+    event_reminders_enabled BOOLEAN NOT NULL DEFAULT true,
+    announcements_enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -122,6 +124,9 @@ CREATE TABLE notifications (
     event_id BIGINT REFERENCES events(event_id) ON DELETE SET NULL,
     message TEXT NOT NULL CHECK (length(trim(message)) > 0),
     is_read BOOLEAN NOT NULL DEFAULT false,
+    notification_type TEXT NOT NULL DEFAULT 'system'
+        CHECK (notification_type IN ('event_update', 'event_cancelled', 'event_approval', 'event_reminder', 'system')),
+    dedupe_key TEXT UNIQUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
