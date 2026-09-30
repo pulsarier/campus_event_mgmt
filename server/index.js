@@ -2,6 +2,7 @@ import 'dotenv/config'
 import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
+import jwt from 'jsonwebtoken'
 import { createAccessControl, createAuthRouter } from './auth.js'
 import { startReminderScheduler } from './reminders.js'
 
@@ -11,6 +12,7 @@ const allowedOrigins = (process.env.CLIENT_ORIGINS ?? 'http://localhost:5173,htt
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const app = express()
 const { authenticate, authorize } = createAccessControl(pool, process.env.JWT_SECRET)
+const attendanceIssuer = 'campus-events'
 
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)) }))
 app.use(express.json({ limit: '32kb' }))
@@ -356,6 +358,132 @@ app.get('/api/registrations/me', authenticate, async (request, response) => {
     [request.user.user_id],
   )
   response.json({ data: result.rows })
+})
+
+app.get('/api/events/:eventId/attendance-pass', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const result = await pool.query(
+    `SELECT e.event_id, e.starts_at, e.ends_at, e.status, r.status AS registration_status
+       FROM events e
+       JOIN registrations r ON r.event_id = e.event_id AND r.user_id = $2
+      WHERE e.event_id = $1`,
+    [eventId, request.user.user_id],
+  )
+  if (result.rowCount !== 1 || result.rows[0].status !== 'approved' || result.rows[0].registration_status !== 'confirmed') {
+    return response.status(403).json({ error: 'A confirmed registration is required for this event' })
+  }
+  const event = result.rows[0]
+  const checkInOpensAt = new Date(event.starts_at).getTime() - 60 * 60 * 1000
+  if (Date.now() < checkInOpensAt) return response.status(409).json({ error: 'Attendance QR passes are available one hour before the event starts' })
+  const expiresAt = Math.floor((new Date(event.ends_at).getTime() + 2 * 60 * 60 * 1000) / 1000)
+  if (expiresAt <= Math.floor(Date.now() / 1000)) return response.status(409).json({ error: 'The attendance window has closed' })
+  const pass = jwt.sign(
+    { purpose: 'attendance', event_id: Number(event.event_id), participant_id: Number(request.user.user_id) },
+    process.env.JWT_SECRET,
+    { algorithm: 'HS256', issuer: attendanceIssuer, audience: attendanceIssuer, expiresIn: expiresAt - Math.floor(Date.now() / 1000) },
+  )
+  response.json({ data: { value: `campus-events-attendance:${pass}`, event_id: Number(event.event_id), expires_at: new Date(expiresAt * 1000).toISOString() } })
+})
+
+app.post('/api/events/:eventId/attendance/scan', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  const encodedPass = typeof request.body?.pass === 'string' ? request.body.pass : ''
+  const passMatch = /^campus-events-attendance:(.+)$/.exec(encodedPass)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  if (!passMatch) return response.status(400).json({ error: 'Invalid attendance QR code' })
+
+  let claims
+  try {
+    claims = jwt.verify(passMatch[1], process.env.JWT_SECRET, {
+      algorithms: ['HS256'], issuer: attendanceIssuer, audience: attendanceIssuer,
+    })
+  } catch {
+    return response.status(400).json({ error: 'Attendance QR code is invalid or expired' })
+  }
+  if (typeof claims === 'string' || claims.purpose !== 'attendance' || Number(claims.event_id) !== eventId || !Number.isSafeInteger(Number(claims.participant_id))) {
+    return response.status(400).json({ error: 'QR code does not belong to this event' })
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const event = await client.query(
+      `SELECT event_id, organizer_id, starts_at, ends_at, status
+         FROM events WHERE event_id = $1 FOR UPDATE`,
+      [eventId],
+    )
+    if (event.rowCount !== 1 || event.rows[0].status !== 'approved' || (request.user.role !== 'admin' && String(event.rows[0].organizer_id) !== String(request.user.user_id))) {
+      await client.query('ROLLBACK')
+      return response.status(404).json({ error: 'Event not found' })
+    }
+    const current = event.rows[0]
+    const now = Date.now()
+    if (now < new Date(current.starts_at).getTime() - 60 * 60 * 1000 || now > new Date(current.ends_at).getTime() + 2 * 60 * 60 * 1000) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'Check-in is outside the event attendance window' })
+    }
+    const registration = await client.query(
+      `SELECT 1 FROM registrations
+        WHERE event_id = $1 AND user_id = $2 AND status = 'confirmed'`,
+      [eventId, claims.participant_id],
+    )
+    if (registration.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(403).json({ error: 'Participant does not have a confirmed registration' })
+    }
+    const participant = await client.query(
+      'SELECT name, email FROM users WHERE user_id = $1',
+      [claims.participant_id],
+    )
+    const attendance = await client.query(
+      `INSERT INTO attendance (event_id, user_id, status)
+       VALUES ($1, $2, 'present')
+       ON CONFLICT (event_id, user_id) DO NOTHING
+       RETURNING attendance_id, marked_at`,
+      [eventId, claims.participant_id],
+    )
+    if (attendance.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'Attendance was already recorded' })
+    }
+    await client.query('COMMIT')
+    return response.status(201).json({ data: { participant: participant.rows[0], marked_at: attendance.rows[0].marked_at } })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/managed-events/:eventId/attendance', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const result = await pool.query(
+    `SELECT e.event_id AS id, e.title, e.organizer_id,
+            COUNT(r.registration_id) FILTER (WHERE r.status = 'confirmed')::INTEGER AS confirmed_count,
+            COUNT(a.attendance_id)::INTEGER AS attended_count,
+            COALESCE(ROUND(100.0 * COUNT(a.attendance_id) / NULLIF(COUNT(r.registration_id) FILTER (WHERE r.status = 'confirmed'), 0), 1), 0) AS attendance_percentage
+       FROM events e
+       LEFT JOIN registrations r ON r.event_id = e.event_id AND r.status = 'confirmed'
+       LEFT JOIN attendance a ON a.event_id = e.event_id AND a.user_id = r.user_id AND a.status = 'present'
+      WHERE e.event_id = $1 AND ($2::BOOLEAN OR e.organizer_id = $3)
+      GROUP BY e.event_id`,
+    [eventId, request.user.role === 'admin', request.user.user_id],
+  )
+  if (result.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+  const participants = await pool.query(
+    `SELECT u.user_id AS id, u.name, u.email, a.marked_at,
+            CASE WHEN a.attendance_id IS NULL THEN false ELSE true END AS attended
+       FROM registrations r
+       JOIN users u ON u.user_id = r.user_id
+       LEFT JOIN attendance a ON a.event_id = r.event_id AND a.user_id = r.user_id AND a.status = 'present'
+      WHERE r.event_id = $1 AND r.status = 'confirmed'
+      ORDER BY u.name`,
+    [eventId],
+  )
+  response.json({ data: { ...result.rows[0], participants: participants.rows } })
 })
 
 app.post('/api/events/:eventId/registrations', authenticate, authorize('student', 'faculty'), async (request, response) => {

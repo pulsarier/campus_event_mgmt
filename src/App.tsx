@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AnimatePresence, MotionConfig, motion } from 'motion/react'
+import QRCode from 'qrcode'
 import './App.css'
 
 type EventItem = { id: number; title: string; category: string; date: string; venue: string; host: string; attendees: number; image: string }
@@ -11,6 +12,8 @@ type CreateEventPayload = { title: string; description: string; category: string
 type VenueOption = { id: number; name: string; location: string; capacity: number }
 type ApiListItem = { id: number | string; status?: string }
 type NotificationItem = { id: number; event_id: number | null; message: string; notification_type: string; is_read: boolean; created_at: string }
+type AttendancePass = { value: string; event_id: number; expires_at: string }
+type AttendanceReport = { id: number; title: string; confirmed_count: number; attended_count: number; attendance_percentage: number; participants: Array<{ id: number; name: string; email: string; marked_at: string | null; attended: boolean }> }
 type PendingEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; venue: string; location: string; organizer: string; organizer_email: string }
 type ManagedEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; status: string; venue_id: number; venue: string; location: string; participant_count: number }
 type ApiResult<T> = { data: T; token?: string; error?: string }
@@ -52,11 +55,13 @@ function App() {
   const [notificationReload, setNotificationReload] = useState(0)
   const [notificationRequest, setNotificationRequest] = useState({ key: '', error: '' })
   const [registered, setRegistered] = useState<number[]>([])
+  const [confirmedRegistrations, setConfirmedRegistrations] = useState<number[]>([])
   const [saved, setSaved] = useState<number[]>([])
   const [query, setQuery] = useState('')
   const [activeFilter, setActiveFilter] = useState('All events')
   const [toast, setToast] = useState('')
   const [account, setAccount] = useState<Account | null>(null)
+  const [attendancePassEvent, setAttendancePassEvent] = useState<EventItem | null>(null)
   useEffect(() => { const syncModule = () => setRequestedNav(moduleFromHash()); window.addEventListener('hashchange', syncModule); window.addEventListener('popstate', syncModule); return () => { window.removeEventListener('hashchange', syncModule); window.removeEventListener('popstate', syncModule) } }, [])
   useEffect(() => {
     let cancelled = false
@@ -93,6 +98,7 @@ function App() {
     ]).then(([registrationsResult, savedResult]) => {
       if (!cancelled) {
         setRegistered(registrationsResult.data.map((item) => Number(item.id)))
+        setConfirmedRegistrations(registrationsResult.data.filter((item) => item.status === 'confirmed').map((item) => Number(item.id)))
         setSaved(savedResult.data.map((item) => Number(item.id)))
         setActivityError('')
       }
@@ -113,6 +119,7 @@ function App() {
       }
       const result = await apiRequest<ApiListItem[]>('/api/registrations/me', {}, token)
       setRegistered(result.data.map((item) => Number(item.id)))
+      setConfirmedRegistrations(result.data.filter((item) => item.status === 'confirmed').map((item) => Number(item.id)))
       setEventsReload((value) => value + 1)
     } catch (error) { notify(error instanceof Error ? error.message : 'Registration could not be updated') }
   }
@@ -164,10 +171,10 @@ function App() {
       {eventsError && <div className="api-alert" role="alert">Events couldn’t be loaded: {eventsError}<button onClick={() => setEventsReload((value) => value + 1)}>Retry</button></div>}
       {activityError && <div className="api-alert" role="alert">Your registrations and saved events couldn’t be loaded: {activityError}</div>}
       {eventsLoading && <p className="api-status" role="status">Loading events…</p>}
-      {activeNav === 'Overview' && <Overview name={account.name} allowCreate={canManageEvents} events={events} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} onDiscover={() => openModule('Discover')} onCreate={() => openModule('Create an event')} />}
-      {activeNav === 'Discover' && <EventBrowser title="Discover events" subtitle="Search the full campus calendar." events={filteredEvents} query={query} setQuery={setQuery} activeFilter={activeFilter} setActiveFilter={setActiveFilter} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} />}
-      {activeNav === 'My registrations' && <EventBrowser title="My registrations" subtitle="Your confirmed and upcoming campus events." events={events.filter((event) => registered.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} />}
-      {activeNav === 'Saved events' && <EventBrowser title="Saved events" subtitle="Events you want to come back to." events={events.filter((event) => saved.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} />}
+      {activeNav === 'Overview' && <Overview name={account.name} allowCreate={canManageEvents} events={events} registered={registered} confirmed={confirmedRegistrations} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} onShowPass={setAttendancePassEvent} onDiscover={() => openModule('Discover')} onCreate={() => openModule('Create an event')} />}
+      {activeNav === 'Discover' && <EventBrowser title="Discover events" subtitle="Search the full campus calendar." events={filteredEvents} query={query} setQuery={setQuery} activeFilter={activeFilter} setActiveFilter={setActiveFilter} registered={registered} confirmed={confirmedRegistrations} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} onShowPass={setAttendancePassEvent} />}
+      {activeNav === 'My registrations' && <EventBrowser title="My registrations" subtitle="Your confirmed and upcoming campus events." events={events.filter((event) => registered.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} confirmed={confirmedRegistrations} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} onShowPass={setAttendancePassEvent} />}
+      {activeNav === 'Saved events' && <EventBrowser title="Saved events" subtitle="Events you want to come back to." events={events.filter((event) => saved.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} confirmed={confirmedRegistrations} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} onShowPass={setAttendancePassEvent} />}
       {activeNav === 'Create an event' && <CreateEvent token={token} onCreate={async (event) => { await apiRequest('/api/events', { method: 'POST', body: JSON.stringify(event) }, token); notify('Event submitted for admin approval'); openModule('Discover') }} />}
       {activeNav === 'Manage events' && <ManageEvents token={token} notify={notify} />}
       {activeNav === 'Insights' && <Insights events={events} registered={registered} saved={saved} />}
@@ -175,12 +182,12 @@ function App() {
       {activeNav === 'Notifications' && <Notifications items={notifications} loading={notificationRequest.key !== `${token}:${notificationReload}`} error={notificationRequest.key === `${token}:${notificationReload}` ? notificationRequest.error : ''} onReload={() => setNotificationReload((value) => value + 1)} onRead={markNotificationRead} onReadAll={markAllNotificationsRead} />}
       {activeNav === 'Account info' && <AccountInfo account={account} onSave={async (nextAccount) => { const result = await apiRequest<AuthUser>('/api/auth/me/preferences', { method: 'PATCH', body: JSON.stringify({ name: nextAccount.name, email: nextAccount.email, department: nextAccount.department, event_reminders_enabled: nextAccount.reminders, announcements_enabled: nextAccount.announcements }) }, token); setAccount({ name: result.data.name, email: result.data.email, department: result.data.department ?? '', role: result.data.role, reminders: result.data.event_reminders_enabled, announcements: result.data.announcements_enabled }); notify('Account information updated') }} onLogout={signOut} />}
     </motion.div></AnimatePresence></div></main><AnimatePresence>{toast && <motion.div className="toast" role="status" initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} transition={{ duration: 0.18, ease: 'easeOut' }}>{toast}<button onClick={() => setToast('')}>×</button></motion.div>}</AnimatePresence>
-  </div></MotionConfig>
+  </div>{attendancePassEvent && <AttendancePassModal event={attendancePassEvent} token={token} onClose={() => setAttendancePassEvent(null)} />}</MotionConfig>
 }
 
-function Overview({ name, allowCreate, events, registered, saved, onRegister, onSave, onDiscover, onCreate }: { name: string; allowCreate: boolean; events: EventItem[]; registered: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onDiscover: () => void; onCreate: () => void }) {
+function Overview({ name, allowCreate, events, registered, confirmed, saved, onRegister, onSave, onShowPass, onDiscover, onCreate }: { name: string; allowCreate: boolean; events: EventItem[]; registered: number[]; confirmed: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void; onDiscover: () => void; onCreate: () => void }) {
   const featured = events[0]
-  return <><section className="welcome-row"><div><p className="eyebrow">Campus events</p><h1>Welcome, {name.split(' ')[0]}</h1><p className="welcome-copy">Find events, register, and keep your campus schedule in one place.</p></div>{allowCreate && <button className="primary-button" onClick={onCreate}><span>＋</span> Create an event</button>}</section>{featured ? <section className="hero-banner"><div className="hero-copy"><span className="tag">Featured event</span><h2>{featured.title}</h2><p>{featured.date} · {featured.venue}</p><button className="text-button" onClick={onDiscover}>View all events <span>↗</span></button></div><div className="hero-stat"><strong>{events.length}</strong><span>published events</span></div></section> : <div className="empty-state">No approved events are available yet.</div>}<section className="stats-row"><div className="stat-card"><div className="stat-icon green">◷</div><div><span>My upcoming</span><strong>{String(registered.length).padStart(2, '0')} <small>events</small></strong></div></div><div className="stat-card"><div className="stat-icon yellow">♢</div><div><span>Saved events</span><strong>{String(saved.length).padStart(2, '0')} <small>to revisit</small></strong></div></div><div className="stat-card"><div className="stat-icon blue">✦</div><div><span>Campus events</span><strong>{events.length} <small>published</small></strong></div></div></section><section className="section-heading"><div><h2>Happening around campus</h2><p>Discover something worth showing up for.</p></div><button className="view-link" onClick={onDiscover}>View all events <span>↗</span></button></section>{events.length > 0 && <EventGrid events={events.slice(0, 3)} registered={registered} saved={saved} onRegister={onRegister} onSave={onSave} />}</>
+  return <><section className="welcome-row"><div><p className="eyebrow">Campus events</p><h1>Welcome, {name.split(' ')[0]}</h1><p className="welcome-copy">Find events, register, and keep your campus schedule in one place.</p></div>{allowCreate && <button className="primary-button" onClick={onCreate}><span>＋</span> Create an event</button>}</section>{featured ? <section className="hero-banner"><div className="hero-copy"><span className="tag">Featured event</span><h2>{featured.title}</h2><p>{featured.date} · {featured.venue}</p><button className="text-button" onClick={onDiscover}>View all events <span>↗</span></button></div><div className="hero-stat"><strong>{events.length}</strong><span>published events</span></div></section> : <div className="empty-state">No approved events are available yet.</div>}<section className="stats-row"><div className="stat-card"><div className="stat-icon green">◷</div><div><span>My upcoming</span><strong>{String(registered.length).padStart(2, '0')} <small>events</small></strong></div></div><div className="stat-card"><div className="stat-icon yellow">♢</div><div><span>Saved events</span><strong>{String(saved.length).padStart(2, '0')} <small>to revisit</small></strong></div></div><div className="stat-card"><div className="stat-icon blue">✦</div><div><span>Campus events</span><strong>{events.length} <small>published</small></strong></div></div></section><section className="section-heading"><div><h2>Happening around campus</h2><p>Discover something worth showing up for.</p></div><button className="view-link" onClick={onDiscover}>View all events <span>↗</span></button></section>{events.length > 0 && <EventGrid events={events.slice(0, 3)} registered={registered} confirmed={confirmed} saved={saved} onRegister={onRegister} onSave={onSave} onShowPass={onShowPass} />}</>
 }
 
 function AuthScreen({ initialError, onAuthenticated }: { initialError: string; onAuthenticated: (token: string) => void }) {
@@ -209,8 +216,8 @@ function AuthScreen({ initialError, onAuthenticated }: { initialError: string; o
   return <main className="auth-screen"><section className="auth-panel"><div className="auth-brand"><span>✳</span> Campus events</div><p className="eyebrow">Campus event management</p><h1>{mode === 'login' ? 'Sign in to your account' : 'Create your account'}</h1><p className="auth-intro">{mode === 'login' ? 'Use your campus account to continue.' : 'Register with your campus email.'}</p><div className="auth-tabs"><button className={mode === 'login' ? 'selected' : ''} onClick={() => { setMode('login'); setError('') }}>Sign in</button><button className={mode === 'register' ? 'selected' : ''} onClick={() => { setMode('register'); setError('') }}>Register</button></div><form className="auth-form" onSubmit={submit}>{mode === 'register' && <><label>Full name<input autoComplete="name" value={name} onChange={(event) => setName(event.target.value)} required minLength={2} maxLength={120} /></label><label>Department<input value={department} onChange={(event) => setDepartment(event.target.value)} maxLength={120} /></label></>}<label>Campus email<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required maxLength={254} /></label><label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === 'register' ? 12 : 1} maxLength={72} /></label>{mode === 'register' && <small className="password-note">Use at least 12 characters.</small>}{error && <p className="auth-error" role="alert">{error}</p>}<button className="primary-button auth-submit" type="submit" disabled={submitting}>{submitting ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}</button></form><p className="auth-footnote">Faculty, organizers, and administrators must sign in with an assigned account.</p></section></main>
 }
 
-function EventBrowser({ title, subtitle, events, query, setQuery, activeFilter, setActiveFilter, registered, saved, onRegister, onSave }: { title: string; subtitle: string; events: EventItem[]; query: string; setQuery: (value: string) => void; activeFilter: string; setActiveFilter: (value: string) => void; registered: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void }) {
-  return <><section className="welcome-row"><div><p className="eyebrow">Campus calendar</p><h1>{title}</h1><p className="welcome-copy">{subtitle}</p></div></section><div className="toolbar"><div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search events, people, places..." /></div><div className="filter-group">{['All events', 'Talks', 'Workshops', 'Sports'].map((filter) => <button key={filter} className={activeFilter === filter ? 'filter active' : 'filter'} onClick={() => setActiveFilter(filter)}>{filter}</button>)}</div></div>{events.length ? <EventGrid events={events} registered={registered} saved={saved} onRegister={onRegister} onSave={onSave} /> : <div className="empty-state">No events here yet.</div>}</>
+function EventBrowser({ title, subtitle, events, query, setQuery, activeFilter, setActiveFilter, registered, confirmed, saved, onRegister, onSave, onShowPass }: { title: string; subtitle: string; events: EventItem[]; query: string; setQuery: (value: string) => void; activeFilter: string; setActiveFilter: (value: string) => void; registered: number[]; confirmed: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void }) {
+  return <><section className="welcome-row"><div><p className="eyebrow">Campus calendar</p><h1>{title}</h1><p className="welcome-copy">{subtitle}</p></div></section><div className="toolbar"><div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search events, people, places..." /></div><div className="filter-group">{['All events', 'Talks', 'Workshops', 'Sports'].map((filter) => <button key={filter} className={activeFilter === filter ? 'filter active' : 'filter'} onClick={() => setActiveFilter(filter)}>{filter}</button>)}</div></div>{events.length ? <EventGrid events={events} registered={registered} confirmed={confirmed} saved={saved} onRegister={onRegister} onSave={onSave} onShowPass={onShowPass} /> : <div className="empty-state">No events here yet.</div>}</>
 }
 
 function Notifications({ items, loading, error, onReload, onRead, onReadAll }: { items: NotificationItem[]; loading: boolean; error: string; onReload: () => void; onRead: (id: number) => void; onReadAll: () => void }) {
@@ -230,6 +237,7 @@ function ManageEvents({ token, notify }: { token: string; notify: (message: stri
   const [loadError, setLoadError] = useState({ key: '', message: '' })
   const [reload, setReload] = useState(0)
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [attendanceEvent, setAttendanceEvent] = useState<ManagedEvent | null>(null)
   const [processingId, setProcessingId] = useState<number | null>(null)
   const requestKey = `${token}:${reload}`
   const loading = loadedKey !== requestKey
@@ -265,7 +273,7 @@ function ManageEvents({ token, notify }: { token: string; notify: (message: stri
     notify('Event changes saved')
   }
 
-  return <><section className="welcome-row"><div><p className="eyebrow">Organizer tools</p><h1>Manage events</h1><p className="welcome-copy">Edit event details or cancel an event. Participants receive schedule and cancellation notices.</p></div><button className="secondary-button" type="button" disabled={loading} onClick={() => setReload((value) => value + 1)}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading your events…</p> : managedEvents.length === 0 ? <div className="empty-state">You have no events to manage.</div> : <section className="managed-event-list">{managedEvents.map((event) => <article className="managed-event" key={event.id}><div className="managed-event-heading"><div><span className={`status-pill status-${event.status}`}>{event.status}</span><h2>{event.title}</h2></div>{event.status !== 'cancelled' && event.status !== 'rejected' && <div className="managed-actions"><button className="secondary-button" type="button" disabled={processingId !== null} onClick={() => setEditingId(editingId === event.id ? null : event.id)}>{editingId === event.id ? 'Close editor' : 'Edit'}</button><button className="reject-button" type="button" disabled={processingId !== null} onClick={() => cancelEvent(event)}>{processingId === event.id ? 'Cancelling…' : 'Cancel event'}</button></div>}</div><p className="managed-summary">{event.category} · {new Date(event.starts_at).toLocaleString()} · {event.venue}, {event.location} · {event.participant_count} participants</p>{editingId === event.id && <EventEditForm event={event} token={token} onSave={(payload) => saveEvent(event.id, payload)} onCancel={() => setEditingId(null)} />}</article>)}</section>}</>
+  return <><section className="welcome-row"><div><p className="eyebrow">Organizer tools</p><h1>Manage events</h1><p className="welcome-copy">Edit event details or cancel an event. Participants receive schedule and cancellation notices.</p></div><button className="secondary-button" type="button" disabled={loading} onClick={() => setReload((value) => value + 1)}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading your events…</p> : managedEvents.length === 0 ? <div className="empty-state">You have no events to manage.</div> : <section className="managed-event-list">{managedEvents.map((event) => <article className="managed-event" key={event.id}><div className="managed-event-heading"><div><span className={`status-pill status-${event.status}`}>{event.status}</span><h2>{event.title}</h2></div><div className="managed-actions">{event.status === 'approved' && <button className="secondary-button" type="button" onClick={() => setAttendanceEvent(event)}>Scan attendance</button>}{event.status !== 'cancelled' && event.status !== 'rejected' && <><button className="secondary-button" type="button" disabled={processingId !== null} onClick={() => setEditingId(editingId === event.id ? null : event.id)}>{editingId === event.id ? 'Close editor' : 'Edit'}</button><button className="reject-button" type="button" disabled={processingId !== null} onClick={() => cancelEvent(event)}>{processingId === event.id ? 'Cancelling…' : 'Cancel event'}</button></>}</div></div><p className="managed-summary">{event.category} · {new Date(event.starts_at).toLocaleString()} · {event.venue}, {event.location} · {event.participant_count} participants</p>{editingId === event.id && <EventEditForm event={event} token={token} onSave={(payload) => saveEvent(event.id, payload)} onCancel={() => setEditingId(null)} />}</article>)}</section>}{attendanceEvent && <AttendanceCheckIn eventId={attendanceEvent.id} title={attendanceEvent.title} token={token} onClose={() => setAttendanceEvent(null)} notify={notify} />}</>
 }
 
 function EventEditForm({ event, token, onSave, onCancel }: { event: ManagedEvent; token: string; onSave: (payload: CreateEventPayload) => Promise<void>; onCancel: () => void }) {
@@ -331,7 +339,18 @@ function Approvals({ token, notify }: { token: string; notify: (message: string)
   return <><section className="welcome-row"><div><p className="eyebrow">Administrator tools</p><h1>Event approvals</h1><p className="welcome-copy">Review event submissions before they appear in the campus calendar.</p></div><button className="secondary-button" type="button" onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading pending submissions…</p> : pendingEvents.length === 0 ? <div className="empty-state">There are no events waiting for approval.</div> : <section className="approval-list">{pendingEvents.map((event) => <article className="approval-item" key={event.id}><div className="approval-main"><div className="approval-title"><div><span className="category-pill static-pill">{event.category}</span><span className="pending-label">Pending review</span></div><h2>{event.title}</h2></div><p>{event.description}</p><dl><div><dt>Organizer</dt><dd>{event.organizer} · {event.organizer_email}</dd></div><div><dt>When</dt><dd>{new Date(event.starts_at).toLocaleString()} to {new Date(event.ends_at).toLocaleTimeString()}</dd></div><div><dt>Venue</dt><dd>{event.venue} · {event.location}</dd></div><div><dt>Registration deadline</dt><dd>{new Date(event.registration_deadline).toLocaleString()}</dd></div><div><dt>Capacity</dt><dd>{event.capacity}</dd></div></dl></div><div className="approval-actions"><button className="approve-button" disabled={processingId !== null} onClick={() => review(event.id, 'approved')}>{processingId === event.id ? 'Saving…' : 'Approve'}</button><button className="reject-button" disabled={processingId !== null} onClick={() => review(event.id, 'rejected')}>Reject</button></div></article>)}</section>}</>
 }
 
-function EventGrid({ events, registered, saved, onRegister, onSave }: { events: EventItem[]; registered: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void }) { return <motion.section className="event-grid" initial="hidden" animate="visible" variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.055 } } }}>{events.map((event) => <motion.article className="event-card" key={event.id} variants={{ hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0, transition: { duration: 0.24, ease: 'easeOut' } } }} whileHover={{ y: -4 }} whileTap={{ scale: 0.99 }}><div className="event-image" style={{ backgroundImage: `url(${event.image})` }}><span className="category-pill">{event.category}</span><button className={saved.includes(event.id) ? 'save-button saved' : 'save-button'} onClick={() => onSave(event)}>{saved.includes(event.id) ? '♥' : '♡'}</button></div><div className="event-info"><div className="event-date">{event.date}</div><h3>{event.title}</h3><div className="event-meta"><span>⌖ {event.venue}</span><span>◉ {event.host}</span></div><div className="event-footer"><div className="attendee-row"><span className="mini-avatar avatar-a">JL</span><span className="mini-avatar avatar-b">SK</span><span className="mini-avatar avatar-c">+{event.attendees - 2}</span></div><button className={registered.includes(event.id) ? 'register registered' : 'register'} onClick={() => onRegister(event)}>{registered.includes(event.id) ? 'Registered ✓' : 'Register'}</button></div></div></motion.article>)}</motion.section> }
+function EventGrid({ events, registered, confirmed, saved, onRegister, onSave, onShowPass }: { events: EventItem[]; registered: number[]; confirmed: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void }) {
+  return <motion.section className="event-grid" initial="hidden" animate="visible" variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.055 } } }}>
+    {events.map((event) => <motion.article className="event-card" key={event.id} variants={{ hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0, transition: { duration: 0.24, ease: 'easeOut' } } }} whileHover={{ y: -4 }} whileTap={{ scale: 0.99 }}>
+      <div className="event-image" style={{ backgroundImage: `url(${event.image})` }}><span className="category-pill">{event.category}</span><button className={saved.includes(event.id) ? 'save-button saved' : 'save-button'} aria-label={saved.includes(event.id) ? 'Remove saved event' : 'Save event'} onClick={() => onSave(event)}>{saved.includes(event.id) ? '♥' : '♡'}</button></div>
+      <div className="event-info"><div className="event-date">{event.date}</div><h3>{event.title}</h3><div className="event-meta"><span>⌖ {event.venue}</span><span>◉ {event.host}</span></div>
+        <div className="event-footer"><div className="attendee-row"><span className="mini-avatar avatar-a">JL</span><span className="mini-avatar avatar-b">SK</span><span className="mini-avatar avatar-c">+{event.attendees - 2}</span></div>
+          <div className="registration-actions">{confirmed.includes(event.id) && <button className="show-pass" onClick={() => onShowPass(event)}>Show QR</button>}<button className={registered.includes(event.id) ? 'register registered' : 'register'} onClick={() => onRegister(event)}>{confirmed.includes(event.id) ? 'Registered ✓' : registered.includes(event.id) ? 'Waitlisted' : 'Register'}</button></div>
+        </div>
+      </div>
+    </motion.article>)}
+  </motion.section>
+}
 
 function CreateEvent({ token, onCreate }: { token: string; onCreate: (event: CreateEventPayload) => Promise<void> }) {
   const [venues, setVenues] = useState<VenueOption[]>([])
@@ -395,6 +414,81 @@ function AccountInfo({ account, onSave, onLogout }: { account: Account; onSave: 
     finally { setSaving(false) }
   }
   return <><section className="welcome-row"><div><p className="eyebrow">Personal settings</p><h1>Account info</h1><p className="welcome-copy">Manage your profile and the notifications you receive.</p></div><button className="secondary-button" type="button" onClick={onLogout}>Sign out</button></section><form className="account-layout" onSubmit={submit}><div className="account-form"><div className="account-header"><span className="large-avatar">{draft.name.split(' ').map((part) => part[0]).join('')}</span><div><strong>{draft.name}</strong><span>{draft.role} · {draft.department}</span></div></div><div className="form-row"><label>Full name<input value={draft.name} onChange={(event) => update('name', event.target.value)} required /></label><label>Email address<input type="email" value={draft.email} onChange={(event) => update('email', event.target.value)} required /></label></div><div className="form-row"><label>Department<select value={draft.department} onChange={(event) => update('department', event.target.value)}><option>Engineering</option><option>Arts and Design</option><option>Business</option><option>Sciences</option></select></label><label>Role<input value={draft.role} readOnly /></label></div>{saveError && <p className="auth-error" role="alert">{saveError}</p>}<button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button></div><div className="preference-panel"><h2>Notifications</h2><p>Choose what you want to hear about.</p><label className="toggle-row"><span><strong>Event reminders</strong><small>Get a reminder before registered events.</small></span><input type="checkbox" checked={draft.reminders} onChange={(event) => update('reminders', event.target.checked)} /></label><label className="toggle-row"><span><strong>Campus announcements</strong><small>Receive important venue and schedule updates.</small></span><input type="checkbox" checked={draft.announcements} onChange={(event) => update('announcements', event.target.checked)} /></label></div></form></>
+}
+
+function AttendancePassModal({ event, token, onClose }: { event: EventItem; token: string; onClose: () => void }) {
+  const [passResult, setPassResult] = useState<{ eventId: number; image: string; expiresAt: string; error: string } | null>(null)
+  const loading = passResult?.eventId !== event.id
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<AttendancePass>(`/api/events/${event.id}/attendance-pass`, {}, token)
+      .then(async ({ data }) => {
+        const image = await QRCode.toDataURL(data.value, { width: 280, margin: 2, errorCorrectionLevel: 'M' })
+        if (!cancelled) setPassResult({ eventId: event.id, image, expiresAt: data.expires_at, error: '' })
+      })
+      .catch((error: Error) => { if (!cancelled) setPassResult({ eventId: event.id, image: '', expiresAt: '', error: error.message }) })
+    return () => { cancelled = true }
+  }, [event.id, token])
+  return <div className="modal-backdrop" onMouseDown={(pointerEvent) => { if (pointerEvent.target === pointerEvent.currentTarget) onClose() }}><section className="attendance-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-pass-title"><button className="modal-close" aria-label="Close QR pass" onClick={onClose}>×</button><p className="eyebrow">Event check-in</p><h2 id="attendance-pass-title">Your attendance QR</h2><p className="pass-event-title">{event.title}</p>{loading ? <p className="api-status">Creating your secure pass…</p> : passResult.error ? <p className="auth-error" role="alert">{passResult.error}</p> : <><img className="attendance-qr" src={passResult.image} alt={`Attendance QR code for ${event.title}`} /><p className="pass-expiry">Pass expires {new Date(passResult.expiresAt).toLocaleString()}</p></>}</section></div>
+}
+
+function AttendanceCheckIn({ eventId, title, token, onClose, notify }: { eventId: number; title: string; token: string; onClose: () => void; notify: (message: string) => void }) {
+  const [report, setReport] = useState<AttendanceReport | null>(null)
+  const [reportError, setReportError] = useState('')
+  const [scanError, setScanError] = useState('')
+  const [scanning, setScanning] = useState(false)
+  const [reload, setReload] = useState(0)
+  const requestKey = `${eventId}:${reload}`
+  const [reportKey, setReportKey] = useState('')
+  const reportLoading = reportKey !== requestKey
+  const scanLocked = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<AttendanceReport>(`/api/managed-events/${eventId}/attendance`, {}, token)
+      .then(({ data }) => { if (!cancelled) { setReport(data); setReportKey(requestKey); setReportError('') } })
+      .catch((error: Error) => { if (!cancelled) { setReportKey(requestKey); setReportError(error.message) } })
+    return () => { cancelled = true }
+  }, [eventId, reload, requestKey, token])
+  const submitPass = async (pass: string) => {
+    if (scanLocked.current) return
+    scanLocked.current = true
+    setScanning(true)
+    setScanError('')
+    try {
+      const result = await apiRequest<{ participant: { name: string }; marked_at: string }>(`/api/events/${eventId}/attendance/scan`, { method: 'POST', body: JSON.stringify({ pass }) }, token)
+      notify(`Checked in ${result.data.participant.name}`)
+      setReload((value) => value + 1)
+    } catch (error) { setScanError(error instanceof Error ? error.message : 'Attendance could not be recorded') }
+    finally { setScanning(false); scanLocked.current = false }
+  }
+  return <div className="modal-backdrop"><section className="attendance-modal attendance-checkin-modal" role="dialog" aria-modal="true" aria-labelledby="attendance-checkin-title"><button className="modal-close" aria-label="Close attendance scanner" onClick={onClose}>×</button><p className="eyebrow">Organizer check-in</p><h2 id="attendance-checkin-title">{title}</h2><div id={`attendance-camera-${eventId}`} className="attendance-camera"></div><p className="scanner-hint">Point the camera at a participant’s event QR pass.</p>{scanError && <p className="auth-error" role="alert">{scanError}</p>}{scanning && <p className="api-status" role="status">Recording attendance…</p>}<div className="attendance-report"><div className="attendance-report-heading"><h3>Attendance</h3><span>{report ? `${report.attended_count} / ${report.confirmed_count} · ${report.attendance_percentage}%` : 'Loading…'}</span></div>{reportError && <p className="auth-error" role="alert">{reportError}</p>}{reportLoading ? <p className="api-status">Loading attendance report…</p> : report && report.participants.length === 0 ? <p className="scanner-hint">No confirmed participants.</p> : report && <ul>{report.participants.map((participant) => <li key={participant.id}><span>{participant.name}</span><span>{participant.attended && participant.marked_at ? `Present · ${new Date(participant.marked_at).toLocaleTimeString()}` : 'Not checked in'}</span></li>)}</ul>}</div></section><AttendanceCameraScanner elementId={`attendance-camera-${eventId}`} onDecoded={submitPass} onError={setScanError} /></div>
+}
+
+function AttendanceCameraScanner({ elementId, onDecoded, onError }: { elementId: string; onDecoded: (value: string) => Promise<void>; onError: (message: string) => void }) {
+  const onDecodedRef = useRef(onDecoded)
+  const onErrorRef = useRef(onError)
+  const scanLock = useRef(false)
+  useEffect(() => { onDecodedRef.current = onDecoded; onErrorRef.current = onError }, [onDecoded, onError])
+  useEffect(() => {
+    let cancelled = false
+    let scanner: import('html5-qrcode').Html5Qrcode | null = null
+    void import('html5-qrcode').then(({ Html5Qrcode }) => {
+      if (cancelled) return
+      scanner = new Html5Qrcode(elementId, { verbose: false })
+      return scanner.start({ facingMode: 'environment' }, { fps: 10, qrbox: { width: 230, height: 230 } }, (value) => {
+        if (scanLock.current) return
+        scanLock.current = true
+        void onDecodedRef.current(value).finally(() => { scanLock.current = false })
+      }, () => {}).then(() => {
+        if (cancelled && scanner?.isScanning) void scanner.stop().then(() => scanner?.clear()).catch(() => undefined)
+      })
+    }).catch((error: Error) => { if (!cancelled) onErrorRef.current(error.message || 'Camera access is unavailable') })
+    return () => {
+      cancelled = true
+      if (scanner?.isScanning) void scanner.stop().then(() => scanner?.clear()).catch(() => undefined)
+    }
+  }, [elementId])
+  return null
 }
 
 export default App
