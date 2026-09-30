@@ -82,6 +82,60 @@ app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin')
   response.status(201).json({ data: result.rows[0] })
 })
 
+app.get('/api/admin/events/pending', authenticate, authorize('admin'), async (_request, response) => {
+  const result = await pool.query(
+    `SELECT e.event_id AS id, e.title, e.description, e.category,
+            e.starts_at, e.ends_at, e.registration_deadline, e.capacity,
+            v.venue_name AS venue, v.location, u.name AS organizer,
+            u.email AS organizer_email
+       FROM events e
+       JOIN venues v ON v.venue_id = e.venue_id
+       JOIN users u ON u.user_id = e.organizer_id
+      WHERE e.status = 'pending'
+      ORDER BY e.created_at, e.event_id`,
+  )
+  response.json({ data: result.rows })
+})
+
+app.patch('/api/admin/events/:eventId/review', authenticate, authorize('admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  const decision = request.body?.decision
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  if (!['approved', 'rejected'].includes(decision)) return response.status(400).json({ error: 'Decision must be approved or rejected' })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const event = await client.query(
+      `UPDATE events
+          SET status = $2
+        WHERE event_id = $1 AND status = 'pending'
+        RETURNING event_id, organizer_id, title, status`,
+      [eventId, decision],
+    )
+    if (event.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'Event is no longer pending review or does not exist' })
+    }
+
+    const reviewed = event.rows[0]
+    const message = decision === 'approved'
+      ? `Your event "${reviewed.title}" has been approved and published.`
+      : `Your event "${reviewed.title}" was not approved.`
+    await client.query(
+      'INSERT INTO notifications (user_id, event_id, message) VALUES ($1, $2, $3)',
+      [reviewed.organizer_id, reviewed.event_id, message],
+    )
+    await client.query('COMMIT')
+    return response.json({ data: { id: reviewed.event_id, status: reviewed.status } })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
 app.get('/api/events/:eventId', async (request, response) => {
   const eventId = Number(request.params.eventId)
   if (!Number.isSafeInteger(eventId) || eventId < 1) {
