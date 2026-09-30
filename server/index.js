@@ -82,6 +82,137 @@ app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin')
   response.status(201).json({ data: result.rows[0] })
 })
 
+app.get('/api/managed-events', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const isAdmin = request.user.role === 'admin'
+  const result = await pool.query(
+    `SELECT e.event_id AS id, e.title, e.description, e.category,
+            e.starts_at, e.ends_at, e.registration_deadline, e.capacity,
+            e.status, e.venue_id, v.venue_name AS venue, v.location,
+            COUNT(r.registration_id) FILTER (WHERE r.status IN ('confirmed', 'waitlisted'))::INTEGER AS participant_count
+       FROM events e
+       JOIN venues v ON v.venue_id = e.venue_id
+       LEFT JOIN registrations r ON r.event_id = e.event_id
+      WHERE ($1::BOOLEAN OR e.organizer_id = $2)
+      GROUP BY e.event_id, v.venue_name, v.location
+      ORDER BY e.starts_at DESC`,
+    [isAdmin, request.user.user_id],
+  )
+  response.json({ data: result.rows })
+})
+
+app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  const { title, description, category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
+  const cleanTitle = typeof title === 'string' ? title.trim() : ''
+  const cleanDescription = typeof description === 'string' ? description.trim() : null
+  const allowedCategories = new Set(['Talks', 'Workshops', 'Sports', 'Exhibitions'])
+  const startDate = new Date(startsAt)
+  const endDate = new Date(endsAt)
+  const deadlineDate = new Date(deadline)
+  const numericVenueId = Number(venueId)
+  const numericCapacity = Number(capacity)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  if (cleanTitle.length < 3 || cleanTitle.length > 180) return response.status(400).json({ error: 'Title must be between 3 and 180 characters' })
+  if (cleanDescription === null || cleanDescription.length > 10000) return response.status(400).json({ error: 'Description must be 10000 characters or fewer' })
+  if (!allowedCategories.has(category)) return response.status(400).json({ error: 'Invalid event category' })
+  if (![startDate, endDate, deadlineDate].every((date) => Number.isFinite(date.getTime())) || endDate <= startDate || deadlineDate > startDate) return response.status(400).json({ error: 'Provide valid event times and a registration deadline no later than the start time' })
+  if (!Number.isSafeInteger(numericVenueId) || numericVenueId < 1 || !Number.isSafeInteger(numericCapacity) || numericCapacity < 1) return response.status(400).json({ error: 'Select a valid venue and positive event capacity' })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query(
+      `SELECT event_id, organizer_id, status, starts_at, ends_at, venue_id
+         FROM events WHERE event_id = $1 FOR UPDATE`,
+      [eventId],
+    )
+    if (existing.rowCount !== 1 || (request.user.role !== 'admin' && String(existing.rows[0].organizer_id) !== String(request.user.user_id))) {
+      await client.query('ROLLBACK')
+      return response.status(404).json({ error: 'Event not found' })
+    }
+    const current = existing.rows[0]
+    if (!['pending', 'approved'].includes(current.status)) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'This event can no longer be edited' })
+    }
+    const confirmedCount = await client.query(
+      `SELECT COUNT(*)::INTEGER AS count FROM registrations
+        WHERE event_id = $1 AND status = 'confirmed'`,
+      [eventId],
+    )
+    if (numericCapacity < confirmedCount.rows[0].count) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'Capacity cannot be lower than the number of confirmed participants' })
+    }
+    const scheduleChanged = current.status === 'approved' && (
+      new Date(current.starts_at).getTime() !== startDate.getTime() ||
+      new Date(current.ends_at).getTime() !== endDate.getTime() ||
+      Number(current.venue_id) !== numericVenueId
+    )
+    const updated = await client.query(
+      `UPDATE events
+          SET title = $2, description = $3, category = $4,
+              starts_at = $5, ends_at = $6, registration_deadline = $7,
+              venue_id = $8, capacity = $9
+        WHERE event_id = $1
+        RETURNING event_id AS id, title, description, category, starts_at,
+                  ends_at, registration_deadline, venue_id, capacity, status`,
+      [eventId, cleanTitle, cleanDescription, category, startDate.toISOString(), endDate.toISOString(), deadlineDate.toISOString(), numericVenueId, numericCapacity],
+    )
+    if (scheduleChanged) {
+      const notification = `The time or venue for "${cleanTitle}" has changed. Please check the updated event details.`
+      await client.query(
+        `INSERT INTO notifications (user_id, event_id, message)
+         SELECT user_id, $1, $2 FROM registrations
+          WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')`,
+        [eventId, notification],
+      )
+    }
+    await client.query('COMMIT')
+    return response.json({ data: updated.rows[0] })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
+app.patch('/api/managed-events/:eventId/cancel', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const event = await client.query(
+      `UPDATE events
+          SET status = 'cancelled'
+        WHERE event_id = $1 AND status IN ('pending', 'approved')
+          AND ($2::BOOLEAN OR organizer_id = $3)
+        RETURNING event_id, title, status`,
+      [eventId, request.user.role === 'admin', request.user.user_id],
+    )
+    if (event.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(404).json({ error: 'Event not found or already closed' })
+    }
+    const cancelledEvent = event.rows[0]
+    await client.query(
+      `INSERT INTO notifications (user_id, event_id, message)
+       SELECT user_id, $1, $2 FROM registrations
+        WHERE event_id = $1 AND status IN ('confirmed', 'waitlisted')`,
+      [cancelledEvent.event_id, `The event "${cancelledEvent.title}" has been cancelled.`],
+    )
+    await client.query('COMMIT')
+    return response.json({ data: { id: cancelledEvent.event_id, status: cancelledEvent.status } })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
 app.get('/api/admin/events/pending', authenticate, authorize('admin'), async (_request, response) => {
   const result = await pool.query(
     `SELECT e.event_id AS id, e.title, e.description, e.category,

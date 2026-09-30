@@ -11,6 +11,7 @@ type CreateEventPayload = { title: string; description: string; category: string
 type VenueOption = { id: number; name: string; location: string; capacity: number }
 type ApiListItem = { id: number | string; status?: string }
 type PendingEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; venue: string; location: string; organizer: string; organizer_email: string }
+type ManagedEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; status: string; venue_id: number; venue: string; location: string; participant_count: number }
 type ApiResult<T> = { data: T; token?: string; error?: string }
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:3001'
 const fallbackImage = 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1000&q=80'
@@ -33,7 +34,7 @@ function mapApiEvent(event: ApiEvent): EventItem {
   return { id: Number(event.id), title: event.title, category: event.category, date: new Date(event.starts_at).toLocaleString(), venue: event.venue, host: event.organizer, attendees: Number(event.registrations), image: fallbackImage }
 }
 const navItems = [['◈', 'Overview'], ['▦', 'Discover'], ['◷', 'My registrations'], ['♢', 'Saved events']]
-const modules = ['Overview', 'Discover', 'My registrations', 'Saved events', 'Create an event', 'Insights', 'Approvals', 'Account info']
+const modules = ['Overview', 'Discover', 'My registrations', 'Saved events', 'Create an event', 'Manage events', 'Insights', 'Approvals', 'Account info']
 
 function moduleFromHash() { const value = decodeURIComponent(window.location.hash.slice(1)); return modules.includes(value) ? value : 'Overview' }
 
@@ -118,8 +119,8 @@ function App() {
   }
   const canManageEvents = account !== null && ['faculty', 'organizer', 'admin'].includes(account.role)
   const isAdmin = account?.role === 'admin'
-  const activeNav = (!canManageEvents && ['Create an event', 'Insights'].includes(requestedNav)) || (!isAdmin && requestedNav === 'Approvals') ? 'Overview' : requestedNav
-  const openModule = (label: string) => { const destination = ((!canManageEvents && ['Create an event', 'Insights'].includes(label)) || (!isAdmin && label === 'Approvals')) ? 'Overview' : label; setRequestedNav(destination); setQuery(''); setActiveFilter('All events'); window.history.pushState({}, '', `#${encodeURIComponent(destination)}`) }
+  const activeNav = (!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(requestedNav)) || (!isAdmin && requestedNav === 'Approvals') ? 'Overview' : requestedNav
+  const openModule = (label: string) => { const destination = ((!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(label)) || (!isAdmin && label === 'Approvals')) ? 'Overview' : label; setRequestedNav(destination); setQuery(''); setActiveFilter('All events'); window.history.pushState({}, '', `#${encodeURIComponent(destination)}`) }
   const signOut = () => { sessionStorage.removeItem('campus-event-token'); setToken(null); setValidatedToken(null); setAccount(null); setRegistered([]); setSaved([]); setEvents([]); openModule('Overview') }
   const authLoading = Boolean(token && validatedToken !== token)
   const requestKey = `${token ?? ''}:${eventsReload}`
@@ -130,7 +131,7 @@ function App() {
   if (!token || !account) return <AuthScreen initialError={authError} onAuthenticated={(nextToken) => { sessionStorage.setItem('campus-event-token', nextToken); setEvents([]); setAuthError(''); setToken(nextToken) }} />
 
   return <MotionConfig reducedMotion="user"><div className="app-shell sidebar-collapsed">
-    <aside className="sidebar"><div className="brand"><span className="brand-mark">✳</span><span>Campus events</span></div><div className="sidebar-label">Workspace</div><nav>{navItems.map(([icon, label]) => <button key={label} className={activeNav === label ? 'nav-item active' : 'nav-item'} onClick={() => openModule(label)}><span className="nav-icon">{icon}</span><span className="nav-label">{label}</span>{label === 'My registrations' && <span className="nav-count">{registered.length}</span>}</button>)}</nav>{canManageEvents && <><div className="sidebar-label lower-label">Manage</div><nav><button className={activeNav === 'Create an event' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Create an event')}><span className="nav-icon">＋</span><span className="nav-label">Create an event</span></button><button className={activeNav === 'Insights' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Insights')}><span className="nav-icon">↗</span><span className="nav-label">Insights</span></button>{isAdmin && <button className={activeNav === 'Approvals' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Approvals')}><span className="nav-icon">✓</span><span className="nav-label">Approvals</span></button>}</nav></>}<div className="sidebar-bottom"><div className="help-card"><span className="help-icon">?</span><div><strong>Need a hand?</strong><span>Visit the help center</span></div><span>→</span></div><button className={activeNav === 'Account info' ? 'profile active' : 'profile'} onClick={() => openModule('Account info')}><span className="avatar">{account.name.split(' ').map((part) => part[0]).join('')}</span><span className="profile-copy"><strong>{account.name}</strong><small>{account.role} · {account.department}</small></span><span>⌄</span></button></div></aside>
+    <aside className="sidebar"><div className="brand"><span className="brand-mark">✳</span><span>Campus events</span></div><div className="sidebar-label">Workspace</div><nav>{navItems.map(([icon, label]) => <button key={label} className={activeNav === label ? 'nav-item active' : 'nav-item'} onClick={() => openModule(label)}><span className="nav-icon">{icon}</span><span className="nav-label">{label}</span>{label === 'My registrations' && <span className="nav-count">{registered.length}</span>}</button>)}</nav>{canManageEvents && <><div className="sidebar-label lower-label">Manage</div><nav><button className={activeNav === 'Create an event' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Create an event')}><span className="nav-icon">＋</span><span className="nav-label">Create an event</span></button><button className={activeNav === 'Manage events' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Manage events')}><span className="nav-icon">▤</span><span className="nav-label">Manage events</span></button><button className={activeNav === 'Insights' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Insights')}><span className="nav-icon">↗</span><span className="nav-label">Insights</span></button>{isAdmin && <button className={activeNav === 'Approvals' ? 'nav-item active' : 'nav-item'} onClick={() => openModule('Approvals')}><span className="nav-icon">✓</span><span className="nav-label">Approvals</span></button>}</nav></>}<div className="sidebar-bottom"><div className="help-card"><span className="help-icon">?</span><div><strong>Need a hand?</strong><span>Visit the help center</span></div><span>→</span></div><button className={activeNav === 'Account info' ? 'profile active' : 'profile'} onClick={() => openModule('Account info')}><span className="avatar">{account.name.split(' ').map((part) => part[0]).join('')}</span><span className="profile-copy"><strong>{account.name}</strong><small>{account.role} · {account.department}</small></span><span>⌄</span></button></div></aside>
     <main className="main-content"><header className="topbar"><div className="breadcrumb"><span>Workspace</span><span>/</span><strong>{activeNav}</strong></div><div className="top-actions"><button className="icon-button" aria-label="Notifications" onClick={() => notify('You have 3 new notifications.')}>♧<i></i></button><button className="user-avatar" aria-label="Open account info" onClick={() => openModule('Account info')}>{account.name.split(' ').map((part) => part[0]).join('')}</button></div></header><div className="content-wrap"><AnimatePresence mode="wait" initial={false}><motion.div className="module-transition" key={activeNav} initial={{ opacity: 0, y: 9 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }} transition={{ duration: 0.18, ease: 'easeOut' }}>
       {eventsError && <div className="api-alert" role="alert">Events couldn’t be loaded: {eventsError}<button onClick={() => setEventsReload((value) => value + 1)}>Retry</button></div>}
       {activityError && <div className="api-alert" role="alert">Your registrations and saved events couldn’t be loaded: {activityError}</div>}
@@ -140,6 +141,7 @@ function App() {
       {activeNav === 'My registrations' && <EventBrowser title="My registrations" subtitle="Your confirmed and upcoming campus events." events={events.filter((event) => registered.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} />}
       {activeNav === 'Saved events' && <EventBrowser title="Saved events" subtitle="Events you want to come back to." events={events.filter((event) => saved.includes(event.id))} query={query} setQuery={setQuery} activeFilter="All events" setActiveFilter={setActiveFilter} registered={registered} saved={saved} onRegister={toggleRegistration} onSave={toggleSaved} />}
       {activeNav === 'Create an event' && <CreateEvent token={token} onCreate={async (event) => { await apiRequest('/api/events', { method: 'POST', body: JSON.stringify(event) }, token); notify('Event submitted for admin approval'); openModule('Discover') }} />}
+      {activeNav === 'Manage events' && <ManageEvents token={token} notify={notify} />}
       {activeNav === 'Insights' && <Insights events={events} registered={registered} saved={saved} />}
       {activeNav === 'Approvals' && <Approvals token={token} notify={notify} />}
       {activeNav === 'Account info' && <AccountInfo account={account} onSave={(nextAccount) => { setAccount(nextAccount); notify('Account information updated') }} onLogout={signOut} />}
@@ -180,6 +182,83 @@ function AuthScreen({ initialError, onAuthenticated }: { initialError: string; o
 
 function EventBrowser({ title, subtitle, events, query, setQuery, activeFilter, setActiveFilter, registered, saved, onRegister, onSave }: { title: string; subtitle: string; events: EventItem[]; query: string; setQuery: (value: string) => void; activeFilter: string; setActiveFilter: (value: string) => void; registered: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void }) {
   return <><section className="welcome-row"><div><p className="eyebrow">Campus calendar</p><h1>{title}</h1><p className="welcome-copy">{subtitle}</p></div></section><div className="toolbar"><div className="search-box"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search events, people, places..." /></div><div className="filter-group">{['All events', 'Talks', 'Workshops', 'Sports'].map((filter) => <button key={filter} className={activeFilter === filter ? 'filter active' : 'filter'} onClick={() => setActiveFilter(filter)}>{filter}</button>)}</div></div>{events.length ? <EventGrid events={events} registered={registered} saved={saved} onRegister={onRegister} onSave={onSave} /> : <div className="empty-state">No events here yet.</div>}</>
+}
+
+function localDateTime(value: string) {
+  const date = new Date(value)
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+}
+
+function ManageEvents({ token, notify }: { token: string; notify: (message: string) => void }) {
+  const [managedEvents, setManagedEvents] = useState<ManagedEvent[]>([])
+  const [loadedKey, setLoadedKey] = useState('')
+  const [loadError, setLoadError] = useState({ key: '', message: '' })
+  const [reload, setReload] = useState(0)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [processingId, setProcessingId] = useState<number | null>(null)
+  const requestKey = `${token}:${reload}`
+  const loading = loadedKey !== requestKey
+  const error = loadError.key === requestKey ? loadError.message : ''
+
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<ManagedEvent[]>('/api/managed-events', {}, token)
+      .then(({ data }) => { if (!cancelled) { setManagedEvents(data); setLoadedKey(requestKey); setLoadError({ key: requestKey, message: '' }) } })
+      .catch((requestError: Error) => { if (!cancelled) { setLoadedKey(requestKey); setLoadError({ key: requestKey, message: requestError.message }) } })
+    return () => { cancelled = true }
+  }, [token, reload, requestKey])
+
+  const cancelEvent = async (event: ManagedEvent) => {
+    if (!window.confirm(`Cancel “${event.title}”? Registered participants will be notified.`)) return
+    setProcessingId(event.id)
+    setLoadError({ key: '', message: '' })
+    try {
+      await apiRequest(`/api/managed-events/${event.id}/cancel`, { method: 'PATCH', body: JSON.stringify({}) }, token)
+      setManagedEvents((current) => current.map((item) => item.id === event.id ? { ...item, status: 'cancelled' } : item))
+      notify('Event cancelled; participants have been notified')
+    } catch (requestError) {
+      setLoadError({ key: requestKey, message: requestError instanceof Error ? requestError.message : 'Event cancellation failed' })
+    } finally {
+      setProcessingId(null)
+    }
+  }
+
+  const saveEvent = async (eventId: number, payload: CreateEventPayload) => {
+    const { data } = await apiRequest<ManagedEvent>(`/api/managed-events/${eventId}`, { method: 'PATCH', body: JSON.stringify(payload) }, token)
+    setManagedEvents((current) => current.map((item) => item.id === eventId ? { ...item, ...data, venue: item.venue, location: item.location } : item))
+    setEditingId(null)
+    notify('Event changes saved')
+  }
+
+  return <><section className="welcome-row"><div><p className="eyebrow">Organizer tools</p><h1>Manage events</h1><p className="welcome-copy">Edit event details or cancel an event. Participants receive schedule and cancellation notices.</p></div><button className="secondary-button" type="button" disabled={loading} onClick={() => setReload((value) => value + 1)}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading your events…</p> : managedEvents.length === 0 ? <div className="empty-state">You have no events to manage.</div> : <section className="managed-event-list">{managedEvents.map((event) => <article className="managed-event" key={event.id}><div className="managed-event-heading"><div><span className={`status-pill status-${event.status}`}>{event.status}</span><h2>{event.title}</h2></div>{event.status !== 'cancelled' && event.status !== 'rejected' && <div className="managed-actions"><button className="secondary-button" type="button" disabled={processingId !== null} onClick={() => setEditingId(editingId === event.id ? null : event.id)}>{editingId === event.id ? 'Close editor' : 'Edit'}</button><button className="reject-button" type="button" disabled={processingId !== null} onClick={() => cancelEvent(event)}>{processingId === event.id ? 'Cancelling…' : 'Cancel event'}</button></div>}</div><p className="managed-summary">{event.category} · {new Date(event.starts_at).toLocaleString()} · {event.venue}, {event.location} · {event.participant_count} participants</p>{editingId === event.id && <EventEditForm event={event} token={token} onSave={(payload) => saveEvent(event.id, payload)} onCancel={() => setEditingId(null)} />}</article>)}</section>}</>
+}
+
+function EventEditForm({ event, token, onSave, onCancel }: { event: ManagedEvent; token: string; onSave: (payload: CreateEventPayload) => Promise<void>; onCancel: () => void }) {
+  const [venues, setVenues] = useState<VenueOption[]>([])
+  const [values, setValues] = useState<CreateEventPayload>({ title: event.title, description: event.description, category: event.category, starts_at: localDateTime(event.starts_at), ends_at: localDateTime(event.ends_at), registration_deadline: localDateTime(event.registration_deadline), venue_id: event.venue_id, capacity: event.capacity })
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<VenueOption[]>('/api/venues', {}, token)
+      .then(({ data }) => { if (!cancelled) setVenues(data) })
+      .catch((requestError: Error) => { if (!cancelled) setError(requestError.message) })
+    return () => { cancelled = true }
+  }, [token])
+  const update = (field: keyof CreateEventPayload, value: string) => setValues((current) => ({ ...current, [field]: field === 'venue_id' || field === 'capacity' ? Number(value) : value }))
+  const submit = async (formEvent: FormEvent) => {
+    formEvent.preventDefault()
+    setSaving(true)
+    setError('')
+    const selectedVenue = venues.find((venue) => venue.id === values.venue_id)
+    if (!selectedVenue) { setError('Select an available venue'); setSaving(false); return }
+    if (values.capacity > selectedVenue.capacity) { setError(`Capacity exceeds this venue’s limit of ${selectedVenue.capacity}`); setSaving(false); return }
+    if (new Date(values.ends_at) <= new Date(values.starts_at) || new Date(values.registration_deadline) > new Date(values.starts_at)) { setError('Check the event start/end times and registration deadline'); setSaving(false); return }
+    try { await onSave({ ...values, starts_at: new Date(values.starts_at).toISOString(), ends_at: new Date(values.ends_at).toISOString(), registration_deadline: new Date(values.registration_deadline).toISOString() }) }
+    catch (requestError) { setError(requestError instanceof Error ? requestError.message : 'Event update failed') }
+    finally { setSaving(false) }
+  }
+  return <form className="event-form inline-event-editor" onSubmit={submit}><label>Title<input value={values.title} onChange={(inputEvent) => update('title', inputEvent.target.value)} required minLength={3} maxLength={180} /></label><label>Description<textarea value={values.description} onChange={(inputEvent) => update('description', inputEvent.target.value)} maxLength={10000} rows={3} required /></label><div className="form-row"><label>Category<select value={values.category} onChange={(inputEvent) => update('category', inputEvent.target.value)}><option>Talks</option><option>Workshops</option><option>Sports</option><option>Exhibitions</option></select></label><label>Venue<select value={values.venue_id} onChange={(inputEvent) => update('venue_id', inputEvent.target.value)}>{venues.map((venue) => <option key={venue.id} value={venue.id}>{venue.name} · {venue.location} · max {venue.capacity}</option>)}</select></label></div><div className="form-row"><label>Starts<input type="datetime-local" value={values.starts_at} onChange={(inputEvent) => update('starts_at', inputEvent.target.value)} required /></label><label>Ends<input type="datetime-local" value={values.ends_at} onChange={(inputEvent) => update('ends_at', inputEvent.target.value)} required /></label></div><div className="form-row"><label>Registration deadline<input type="datetime-local" value={values.registration_deadline} onChange={(inputEvent) => update('registration_deadline', inputEvent.target.value)} required /></label><label>Capacity<input type="number" min="1" max="5000" value={values.capacity} onChange={(inputEvent) => update('capacity', inputEvent.target.value)} required /></label></div>{error && <p className="auth-error" role="alert">{error}</p>}<div className="managed-actions"><button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save event'}</button><button className="secondary-button" type="button" onClick={onCancel}>Discard</button></div></form>
 }
 
 function Approvals({ token, notify }: { token: string; notify: (message: string) => void }) {
