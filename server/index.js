@@ -16,6 +16,29 @@ const app = express()
 const { authenticate, authorize } = createAccessControl(pool, process.env.JWT_SECRET)
 const attendanceIssuer = 'campus-events'
 
+function escapeCalendarText(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/\r?\n/g, '\\n').replace(/,/g, '\\,').replace(/;/g, '\\;')
+}
+
+function foldCalendarLine(line) {
+  let folded = ''
+  let byteLength = 0
+  for (const character of line) {
+    const characterBytes = Buffer.byteLength(character)
+    if (byteLength + characterBytes > 75) {
+      folded += '\r\n '
+      byteLength = 1
+    }
+    folded += character
+    byteLength += characterBytes
+  }
+  return folded
+}
+
+function calendarTimestamp(value) {
+  return new Date(value).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
+}
+
 app.use(cors({ origin: (origin, callback) => callback(null, !origin || allowedOrigins.includes(origin)) }))
 app.use(express.json({ limit: '32kb' }))
 app.use('/api/auth', createAuthRouter(pool, process.env.JWT_SECRET))
@@ -151,6 +174,44 @@ app.get('/api/events', async (request, response) => {
     search ? [search, values[0]] : ['', ''],
   )
   response.json({ data: result.rows })
+})
+
+app.get('/api/events/:eventId/calendar.ics', async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const result = await pool.query(
+    `SELECT e.title, e.description, e.starts_at, e.ends_at,
+            v.venue_name AS venue, v.location, u.name AS organizer
+       FROM events e
+       JOIN venues v ON v.venue_id = e.venue_id
+       JOIN users u ON u.user_id = e.organizer_id
+      WHERE e.event_id = $1 AND e.status = 'approved'`,
+    [eventId],
+  )
+  if (result.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+
+  const event = result.rows[0]
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Campus Events//Calendar Export//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:event-${eventId}@campus-events`,
+    `DTSTAMP:${calendarTimestamp(new Date())}`,
+    `DTSTART:${calendarTimestamp(event.starts_at)}`,
+    `DTEND:${calendarTimestamp(event.ends_at)}`,
+    `SUMMARY:${escapeCalendarText(event.title)}`,
+    `DESCRIPTION:${escapeCalendarText(event.description || `Hosted by ${event.organizer}`)}`,
+    `LOCATION:${escapeCalendarText(`${event.venue}, ${event.location}`)}`,
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ]
+  response.setHeader('Content-Type', 'text/calendar; charset=utf-8')
+  response.setHeader('Content-Disposition', `attachment; filename="campus-event-${eventId}.ics"`)
+  response.setHeader('Cache-Control', 'no-store')
+  return response.send(`${lines.map(foldCalendarLine).join('\r\n')}\r\n`)
 })
 
 app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
