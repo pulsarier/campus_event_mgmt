@@ -4,6 +4,7 @@ import express from 'express'
 import pg from 'pg'
 import jwt from 'jsonwebtoken'
 import { createAccessControl, createAuthRouter } from './auth.js'
+import { sendRegisteredNotificationEmails, sendUserNotificationEmail } from './mailer.js'
 import { startReminderScheduler } from './reminders.js'
 
 const { Pool } = pg
@@ -276,6 +277,15 @@ app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'or
       )
     }
     await client.query('COMMIT')
+    if (scheduleChanged) {
+      void sendRegisteredNotificationEmails(
+        pool,
+        eventId,
+        ['confirmed', 'waitlisted'],
+        'Campus Events: event schedule updated',
+        `The schedule for "${cleanTitle}" has changed. The event now starts at ${startDate.toLocaleString()} and ends at ${endDate.toLocaleString()}. Sign in to Campus Events for the latest details.`,
+      )
+    }
     return response.json({ data: updated.rows[0] })
   } catch (error) {
     await client.query('ROLLBACK')
@@ -318,6 +328,13 @@ app.patch('/api/managed-events/:eventId/cancel', authenticate, authorize('facult
       [cancelledEvent.event_id, `The event "${cancelledEvent.title}" has been cancelled.`],
     )
     await client.query('COMMIT')
+    void sendRegisteredNotificationEmails(
+      pool,
+      cancelledEvent.event_id,
+      ['confirmed', 'waitlisted'],
+      'Campus Events: event cancelled',
+      `The event "${cancelledEvent.title}" has been cancelled. Sign in to Campus Events for more information.`,
+    )
     return response.json({ data: { id: cancelledEvent.event_id, status: cancelledEvent.status } })
   } catch (error) {
     await client.query('ROLLBACK')
@@ -374,6 +391,7 @@ app.patch('/api/admin/events/:eventId/review', authenticate, authorize('admin'),
       [reviewed.organizer_id, reviewed.event_id, message, 'event_approval'],
     )
     await client.query('COMMIT')
+    void sendUserNotificationEmail(pool, reviewed.organizer_id, 'Campus Events: event review update', message)
     return response.json({ data: { id: reviewed.event_id, status: reviewed.status } })
   } catch (error) {
     await client.query('ROLLBACK')
