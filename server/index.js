@@ -3,6 +3,7 @@ import cors from 'cors'
 import express from 'express'
 import pg from 'pg'
 import jwt from 'jsonwebtoken'
+import PDFDocument from 'pdfkit'
 import { createAccessControl, createAuthRouter } from './auth.js'
 import { sendRegisteredNotificationEmails, sendUserNotificationEmail } from './mailer.js'
 import { startReminderScheduler } from './reminders.js'
@@ -578,18 +579,63 @@ app.get('/api/managed-events/:eventId/feedback', authenticate, authorize('facult
 
 app.get('/api/registrations/me', authenticate, async (request, response) => {
   const result = await pool.query(
-    `SELECT r.event_id AS id, r.status AS registration_status,
-            e.title, e.category, e.starts_at, e.capacity,
+    `SELECT r.event_id AS id, r.status,
+            e.title, e.category, e.starts_at, e.ends_at, e.capacity,
+            CASE WHEN a.attendance_id IS NULL THEN false ELSE true END AS attended,
             v.venue_name AS venue, u.name AS organizer
        FROM registrations r
        JOIN events e ON e.event_id = r.event_id
        JOIN venues v ON v.venue_id = e.venue_id
        JOIN users u ON u.user_id = e.organizer_id
+       LEFT JOIN attendance a ON a.event_id = r.event_id AND a.user_id = r.user_id AND a.status = 'present'
       WHERE r.user_id = $1 AND r.status IN ('confirmed', 'waitlisted')
       ORDER BY e.starts_at`,
     [request.user.user_id],
   )
   response.json({ data: result.rows })
+})
+
+app.get('/api/events/:eventId/certificate', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const result = await pool.query(
+    `SELECT e.title, e.starts_at, e.ends_at, u.name AS attendee_name, a.marked_at
+       FROM events e
+       JOIN registrations r ON r.event_id = e.event_id AND r.user_id = $2 AND r.status = 'confirmed'
+       JOIN attendance a ON a.event_id = e.event_id AND a.user_id = r.user_id AND a.status = 'present'
+       JOIN users u ON u.user_id = r.user_id
+      WHERE e.event_id = $1 AND e.status = 'approved' AND e.ends_at <= now()`,
+    [eventId, request.user.user_id],
+  )
+  if (result.rowCount !== 1) return response.status(403).json({ error: 'A completed event and recorded attendance are required for a certificate' })
+
+  const certificate = result.rows[0]
+  const document = new PDFDocument({ size: 'A4', layout: 'landscape', margin: 54, info: { Title: `Certificate of Attendance: ${certificate.title}`, Author: 'Campus Events' } })
+  response.setHeader('Content-Type', 'application/pdf')
+  response.setHeader('Content-Disposition', `attachment; filename="attendance-certificate-${eventId}.pdf"`)
+  document.pipe(response)
+  document.rect(34, 34, 774, 534).lineWidth(2).strokeColor('#416b4c').stroke()
+  document.rect(43, 43, 756, 516).lineWidth(0.7).strokeColor('#9cb59f').stroke()
+  document.fillColor('#416b4c').font('Helvetica-Bold').fontSize(12).text('CAMPUS EVENTS', 65, 82, { align: 'center', characterSpacing: 2 })
+  document.moveDown(1.7)
+  document.fillColor('#293c31').font('Helvetica-Bold').fontSize(30).text('CERTIFICATE OF ATTENDANCE', { align: 'center' })
+  document.moveDown(1.2)
+  document.fillColor('#65756a').font('Helvetica').fontSize(14).text('This certifies that', { align: 'center' })
+  document.moveDown(0.55)
+  document.fillColor('#2e5038').font('Helvetica-Bold').fontSize(27).text(certificate.attendee_name, { align: 'center' })
+  document.moveDown(0.65)
+  document.fillColor('#65756a').font('Helvetica').fontSize(14).text('attended', { align: 'center' })
+  document.moveDown(0.45)
+  document.fillColor('#293c31').font('Helvetica-Bold').fontSize(20).text(certificate.title, { align: 'center', width: 660, lineGap: 5 })
+  document.moveDown(0.55)
+  document.fillColor('#65756a').font('Helvetica').fontSize(12).text(
+    `${new Date(certificate.starts_at).toLocaleDateString()} - ${new Date(certificate.ends_at).toLocaleDateString()}`,
+    { align: 'center' },
+  )
+  document.moveTo(300, 472).lineTo(542, 472).lineWidth(0.7).strokeColor('#9cb59f').stroke()
+  document.fillColor('#416b4c').font('Helvetica-Bold').fontSize(10).text('CAMPUS EVENT OFFICE', 300, 482, { width: 242, align: 'center', characterSpacing: 1 })
+  document.fillColor('#829087').font('Helvetica').fontSize(9).text(`Attendance verified ${new Date(certificate.marked_at).toLocaleDateString()}`, 65, 526, { align: 'center' })
+  document.end()
 })
 
 app.get('/api/events/:eventId/attendance-pass', authenticate, authorize('student', 'faculty'), async (request, response) => {
