@@ -35,6 +35,9 @@
 .insight-row { display: grid; grid-template-columns: 1.3fr 2fr 45px; align-items: center; gap: 16px; border-top: 1px solid #edf1ed; padding: 14px 0; color: #66766d; font-size: 11px; }
 .insight-row strong { color: #4a6255; text-align: right; }
 .progress { height: 7px; border-radius: 5px; background: #edf3ee; overflow: hidden; }.progress i { display: block; height: 100%; border-radius: 5px; background: #6c9b7a; }
+.analytics-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }.analytics-table-wrap { overflow-x: auto; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: #fff; }.analytics-table { width: 100%; min-width: 760px; border-collapse: collapse; text-align: left; }.analytics-table th { padding: 11px 13px; color: #8b9990; font-size: 9px; font-weight: 700; text-transform: uppercase; border-bottom: 1px solid var(--line); }.analytics-table td { padding: 13px; color: #56685e; font-size: 11px; border-bottom: 1px solid #edf1ed; vertical-align: middle; }.analytics-table tbody tr:last-child td { border-bottom: 0; }.analytics-table td:first-child strong, .analytics-table td:first-child span, .analytics-table td:not(:first-child) span { display: block; }.analytics-table td:first-child strong { color: #34473c; font-size: 11px; }.analytics-table td span { margin-top: 4px; color: #8c9991; font-size: 9px; }.analytics-table td .status-pill { display: inline-block; margin: 0; }
+@media (max-width: 1000px) { .analytics-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 520px) { .analytics-stats { grid-template-columns: 1fr; } }
 .profile.active { background: #edf5ef; border-radius: 7px; padding-block: 7px; }
 .account-layout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, .85fr); gap: 16px; max-width: 900px; align-items: start; }
 .account-form, .preference-panel { background: #fff; border: 1px solid var(--line); border-radius: 7px; padding: 24px; }

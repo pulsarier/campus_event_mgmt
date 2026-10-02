@@ -331,6 +331,38 @@ app.get('/api/managed-events', authenticate, authorize('faculty', 'organizer', '
   response.json({ data: result.rows })
 })
 
+app.get('/api/analytics/me', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const result = await pool.query(
+    `WITH event_metrics AS (
+       SELECT e.event_id,
+              COUNT(r.registration_id) FILTER (WHERE r.status = 'confirmed')::INTEGER AS confirmed_count,
+              COUNT(r.registration_id) FILTER (WHERE r.status = 'waitlisted')::INTEGER AS waitlisted_count,
+              COUNT(a.attendance_id) FILTER (WHERE a.status = 'present')::INTEGER AS attended_count
+         FROM events e
+         LEFT JOIN registrations r ON r.event_id = e.event_id
+         LEFT JOIN attendance a ON a.event_id = r.event_id AND a.user_id = r.user_id
+        GROUP BY e.event_id
+     ), feedback_metrics AS (
+       SELECT event_id, ROUND(AVG(rating)::NUMERIC, 2) AS average_rating,
+              COUNT(*)::INTEGER AS feedback_count
+         FROM feedback
+        GROUP BY event_id
+     )
+     SELECT e.event_id AS id, e.title, e.category, e.status, e.starts_at,
+            em.confirmed_count, em.waitlisted_count, em.attended_count,
+            COALESCE(ROUND(100.0 * em.attended_count / NULLIF(em.confirmed_count, 0), 1), 0) AS attendance_percentage,
+            COALESCE(fm.average_rating, 0) AS average_rating,
+            COALESCE(fm.feedback_count, 0) AS feedback_count
+       FROM events e
+       JOIN event_metrics em ON em.event_id = e.event_id
+       LEFT JOIN feedback_metrics fm ON fm.event_id = e.event_id
+      WHERE ($1::BOOLEAN OR e.organizer_id = $2)
+      ORDER BY e.starts_at DESC, e.event_id DESC`,
+    [request.user.role === 'admin', request.user.user_id],
+  )
+  return response.json({ data: result.rows })
+})
+
 app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
   const eventId = Number(request.params.eventId)
   const { title, description, category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
