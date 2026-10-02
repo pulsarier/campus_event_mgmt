@@ -214,6 +214,74 @@ app.get('/api/events/:eventId/calendar.ics', async (request, response) => {
   return response.send(`${lines.map(foldCalendarLine).join('\r\n')}\r\n`)
 })
 
+app.get('/api/recommendations/me', authenticate, async (request, response) => {
+  const result = await pool.query(
+    `WITH preference_signals AS (
+       SELECT e.category, 1::NUMERIC AS weight
+         FROM registrations r
+         JOIN events e ON e.event_id = r.event_id
+        WHERE r.user_id = $1 AND r.status = 'confirmed'
+       UNION ALL
+       SELECT e.category, 2::NUMERIC AS weight
+         FROM saved_events s
+         JOIN events e ON e.event_id = s.event_id
+        WHERE s.user_id = $1
+       UNION ALL
+       SELECT e.category, f.rating::NUMERIC AS weight
+         FROM feedback f
+         JOIN events e ON e.event_id = f.event_id
+        WHERE f.user_id = $1 AND f.rating >= 4
+     ), category_scores AS (
+       SELECT category, SUM(weight) AS score
+         FROM preference_signals
+        GROUP BY category
+     ), event_popularity AS (
+       SELECT e.event_id,
+              COUNT(r.registration_id) FILTER (WHERE r.status = 'confirmed')::INTEGER AS confirmed_count
+         FROM events e
+         LEFT JOIN registrations r ON r.event_id = e.event_id
+        GROUP BY e.event_id
+     ), event_ratings AS (
+       SELECT event_id, AVG(rating)::NUMERIC AS average_rating
+         FROM feedback
+        GROUP BY event_id
+     )
+     SELECT e.event_id AS id, e.title, e.category, e.starts_at, e.ends_at,
+            v.venue_name AS venue, u.name AS organizer,
+            popularity.confirmed_count AS registrations,
+            CASE WHEN category_scores.category IS NOT NULL
+                 THEN 'Based on your activity'
+                 WHEN popularity.confirmed_count > 0 THEN 'Popular with attendees'
+                 ELSE 'Upcoming on campus'
+            END AS recommendation_reason
+       FROM events e
+       JOIN venues v ON v.venue_id = e.venue_id
+       JOIN users u ON u.user_id = e.organizer_id
+       JOIN event_popularity popularity ON popularity.event_id = e.event_id
+       LEFT JOIN category_scores ON category_scores.category = e.category
+       LEFT JOIN event_ratings ratings ON ratings.event_id = e.event_id
+      WHERE e.status = 'approved' AND e.starts_at > now()
+        AND e.registration_deadline >= now()
+        AND popularity.confirmed_count < e.capacity
+        AND NOT EXISTS (
+          SELECT 1 FROM registrations r
+           WHERE r.event_id = e.event_id AND r.user_id = $1
+             AND r.status <> 'cancelled'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM saved_events s
+           WHERE s.event_id = e.event_id AND s.user_id = $1
+        )
+      ORDER BY COALESCE(category_scores.score, 0) DESC,
+               COALESCE(ratings.average_rating, 0) DESC,
+               popularity.confirmed_count DESC,
+               e.starts_at
+      LIMIT 8`,
+    [request.user.user_id],
+  )
+  return response.json({ data: result.rows })
+})
+
 app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
   const { title, description = '', category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
   const cleanTitle = typeof title === 'string' ? title.trim() : ''
