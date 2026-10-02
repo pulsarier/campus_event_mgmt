@@ -344,6 +344,159 @@ app.get('/api/events/:eventId', async (request, response) => {
   response.json({ data: result.rows[0] })
 })
 
+app.get('/api/events/:eventId/feedback', authenticate, async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+
+  const eventResult = await pool.query(
+    `SELECT e.event_id AS id, e.title, e.organizer_id,
+            EXISTS (
+              SELECT 1
+              FROM registrations r
+              WHERE r.event_id = e.event_id
+                AND r.user_id = $2
+                AND r.status = 'confirmed'
+            ) AS is_attendee
+       FROM events e
+      WHERE e.event_id = $1`,
+    [eventId, request.user.user_id],
+  )
+  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+
+  const event = eventResult.rows[0]
+  const authorized = request.user.role === 'admin' || String(event.organizer_id) === String(request.user.user_id) || event.is_attendee
+  if (!authorized) return response.status(403).json({ error: 'Feedback is available only to the event organizer, admin staff, or confirmed attendees' })
+
+  const summaryResult = await pool.query(
+    `SELECT COALESCE(ROUND(AVG(rating)::NUMERIC, 2), 0) AS average_rating,
+            COUNT(*)::INTEGER AS total_reviews
+       FROM feedback
+      WHERE event_id = $1`,
+    [eventId],
+  )
+  const itemsResult = await pool.query(
+    `SELECT f.feedback_id AS id, f.user_id, u.name AS user_name, f.rating, f.comment, f.created_at
+       FROM feedback f
+       JOIN users u ON u.user_id = f.user_id
+      WHERE f.event_id = $1
+      ORDER BY f.created_at DESC, f.feedback_id DESC`,
+    [eventId],
+  )
+  response.json({
+    data: {
+      event_id: eventId,
+      event_title: event.title,
+      average_rating: Number(summaryResult.rows[0].average_rating ?? 0),
+      total_reviews: Number(summaryResult.rows[0].total_reviews ?? 0),
+      items: itemsResult.rows,
+    },
+  })
+})
+
+app.post('/api/events/:eventId/feedback', authenticate, authorize('student', 'faculty'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  const rating = Number(request.body?.rating)
+  const comment = typeof request.body?.comment === 'string' ? request.body.comment.trim() : ''
+
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return response.status(400).json({ error: 'Rating must be between 1 and 5' })
+  if (comment.length < 3 || comment.length > 1500) return response.status(400).json({ error: 'Feedback comments must be between 3 and 1500 characters long' })
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const event = await client.query(
+      `SELECT event_id, ends_at, status
+         FROM events
+        WHERE event_id = $1
+        FOR UPDATE`,
+      [eventId],
+    )
+    if (event.rowCount !== 1 || event.rows[0].status !== 'approved') {
+      await client.query('ROLLBACK')
+      return response.status(404).json({ error: 'Event not found or not available for feedback' })
+    }
+    if (Date.now() < new Date(event.rows[0].ends_at).getTime()) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'Feedback can only be submitted after the event has ended' })
+    }
+
+    const registration = await client.query(
+      `SELECT 1
+         FROM registrations
+        WHERE event_id = $1 AND user_id = $2 AND status = 'confirmed'`,
+      [eventId, request.user.user_id],
+    )
+    if (registration.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(403).json({ error: 'Only confirmed attendees can submit feedback' })
+    }
+
+    const result = await client.query(
+      `INSERT INTO feedback (event_id, user_id, rating, comment)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (event_id, user_id) DO NOTHING
+       RETURNING feedback_id AS id, rating, comment, created_at`,
+      [eventId, request.user.user_id, rating, comment],
+    )
+    if (result.rowCount !== 1) {
+      await client.query('ROLLBACK')
+      return response.status(409).json({ error: 'You have already submitted feedback for this event' })
+    }
+    await client.query('COMMIT')
+    response.status(201).json({ data: result.rows[0] })
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+})
+
+app.get('/api/managed-events/:eventId/feedback', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
+  const eventId = Number(request.params.eventId)
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+
+  const eventResult = await pool.query(
+    `SELECT event_id AS id, title, organizer_id
+       FROM events
+      WHERE event_id = $1`,
+    [eventId],
+  )
+  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+
+  const event = eventResult.rows[0]
+  if (request.user.role !== 'admin' && String(event.organizer_id) !== String(request.user.user_id)) {
+    return response.status(403).json({ error: 'You are not authorized to view feedback for this event' })
+  }
+
+  const summaryResult = await pool.query(
+    `SELECT COALESCE(ROUND(AVG(rating)::NUMERIC, 2), 0) AS average_rating,
+            COUNT(*)::INTEGER AS total_reviews
+       FROM feedback
+      WHERE event_id = $1`,
+    [eventId],
+  )
+  const itemsResult = await pool.query(
+    `SELECT f.feedback_id AS id, u.name AS user_name, f.rating, f.comment, f.created_at
+       FROM feedback f
+       JOIN users u ON u.user_id = f.user_id
+      WHERE f.event_id = $1
+      ORDER BY f.created_at DESC, f.feedback_id DESC`,
+    [eventId],
+  )
+
+  response.json({
+    data: {
+      event_id: eventId,
+      event_title: event.title,
+      average_rating: Number(summaryResult.rows[0].average_rating ?? 0),
+      total_reviews: Number(summaryResult.rows[0].total_reviews ?? 0),
+      items: itemsResult.rows,
+    },
+  })
+})
+
 app.get('/api/registrations/me', authenticate, async (request, response) => {
   const result = await pool.query(
     `SELECT r.event_id AS id, r.status AS registration_status,

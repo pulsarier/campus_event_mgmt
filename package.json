@@ -19,6 +19,7 @@
     "html5-qrcode": "^2.3.8",
     "jsonwebtoken": "^9.0.3",
     "motion": "^13.4.6",
+    "nodemailer": "^10.0.13",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.8",
