@@ -69,6 +69,67 @@ app.get('/api/venues', async (_request, response) => {
   response.json({ data: result.rows })
 })
 
+app.get('/api/admin/venues', authenticate, authorize('admin'), async (_request, response) => {
+  const result = await pool.query(
+    `SELECT venue_id AS id, venue_name AS name, location, capacity, availability
+       FROM venues ORDER BY venue_name`,
+  )
+  response.json({ data: result.rows })
+})
+
+app.post('/api/admin/venues', authenticate, authorize('admin'), async (request, response) => {
+  const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
+  const location = typeof request.body?.location === 'string' ? request.body.location.trim() : ''
+  const capacity = Number(request.body?.capacity)
+  if (name.length < 2 || name.length > 120) return response.status(400).json({ error: 'Venue name must be between 2 and 120 characters' })
+  if (location.length < 2 || location.length > 240) return response.status(400).json({ error: 'Location must be between 2 and 240 characters' })
+  if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 50000) return response.status(400).json({ error: 'Capacity must be between 1 and 50000' })
+  const result = await pool.query(
+    `INSERT INTO venues (venue_name, location, capacity, availability)
+     VALUES ($1, $2, $3, true)
+     RETURNING venue_id AS id, venue_name AS name, location, capacity, availability`,
+    [name, location, capacity],
+  )
+  return response.status(201).json({ data: result.rows[0] })
+})
+
+app.patch('/api/admin/venues/:venueId', authenticate, authorize('admin'), async (request, response) => {
+  const venueId = Number(request.params.venueId)
+  const name = typeof request.body?.name === 'string' ? request.body.name.trim() : ''
+  const location = typeof request.body?.location === 'string' ? request.body.location.trim() : ''
+  const capacity = Number(request.body?.capacity)
+  const availability = request.body?.availability
+  if (!Number.isSafeInteger(venueId) || venueId < 1) return response.status(400).json({ error: 'Invalid venue ID' })
+  if (name.length < 2 || name.length > 120) return response.status(400).json({ error: 'Venue name must be between 2 and 120 characters' })
+  if (location.length < 2 || location.length > 240) return response.status(400).json({ error: 'Location must be between 2 and 240 characters' })
+  if (!Number.isSafeInteger(capacity) || capacity < 1 || capacity > 50000) return response.status(400).json({ error: 'Capacity must be between 1 and 50000' })
+  if (typeof availability !== 'boolean') return response.status(400).json({ error: 'Availability must be true or false' })
+
+  const activeEvents = await pool.query(
+    `SELECT COUNT(*)::INTEGER AS count, MAX(capacity)::INTEGER AS max_capacity
+       FROM events
+      WHERE venue_id = $1 AND status IN ('pending', 'approved') AND ends_at > now()`,
+    [venueId],
+  )
+  if (activeEvents.rowCount !== 1) return response.status(404).json({ error: 'Venue not found' })
+  if (!availability && activeEvents.rows[0].count > 0) {
+    return response.status(409).json({ error: 'This venue has active events; cancel or reschedule them before making it unavailable' })
+  }
+  if (capacity < Number(activeEvents.rows[0].max_capacity ?? 0)) {
+    return response.status(409).json({ error: 'Capacity cannot be lower than an active event capacity' })
+  }
+
+  const result = await pool.query(
+    `UPDATE venues
+        SET venue_name = $2, location = $3, capacity = $4, availability = $5
+      WHERE venue_id = $1
+      RETURNING venue_id AS id, venue_name AS name, location, capacity, availability`,
+    [venueId, name, location, capacity, availability],
+  )
+  if (result.rowCount !== 1) return response.status(404).json({ error: 'Venue not found' })
+  return response.json({ data: result.rows[0] })
+})
+
 app.get('/api/events', async (request, response) => {
   const search = typeof request.query.search === 'string' ? request.query.search.trim() : ''
   const values = search ? [`%${search}%`] : []

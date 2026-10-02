@@ -12,6 +12,8 @@ type FeedbackItem = { id: number; user_id: number; user_name: string; rating: nu
 type FeedbackSummary = { event_id: number; event_title: string; average_rating: number; total_reviews: number; items: FeedbackItem[] }
 type CreateEventPayload = { title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; venue_id: number; capacity: number }
 type VenueOption = { id: number; name: string; location: string; capacity: number }
+type AdminUser = { id: number | string; name: string; email: string; role: string; department: string | null; created_at: string }
+type AdminVenue = { id: number | string; name: string; location: string; capacity: number; availability: boolean }
 type ApiListItem = { id: number | string; status?: string }
 type NotificationItem = { id: number; event_id: number | null; message: string; notification_type: string; is_read: boolean; created_at: string }
 type AttendancePass = { value: string; event_id: number; expires_at: string }
@@ -50,8 +52,8 @@ function mapApiEvent(event: ApiEvent): EventItem {
     ends_at: event.ends_at,
   }
 }
-const navItems = [['◈', 'Overview'], ['▦', 'Discover'], ['◷', 'My registrations'], ['♢', 'Saved events']]
-const modules = ['Overview', 'Discover', 'My registrations', 'Saved events', 'Create an event', 'Manage events', 'Insights', 'Approvals', 'Notifications', 'Account info']
+const baseNavItems = [['◈', 'Overview'], ['▦', 'Discover'], ['◷', 'My registrations'], ['♢', 'Saved events']]
+const modules = ['Overview', 'Discover', 'My registrations', 'Saved events', 'Create an event', 'Manage events', 'Insights', 'Approvals', 'Users', 'Venues', 'Notifications', 'Account info']
 
 function moduleFromHash() { const value = decodeURIComponent(window.location.hash.slice(1)); return modules.includes(value) ? value : 'Overview' }
 
@@ -177,8 +179,9 @@ function App() {
   const unreadNotifications = notifications.filter((item) => !item.is_read).length
   const canManageEvents = account !== null && ['faculty', 'organizer', 'admin'].includes(account.role)
   const isAdmin = account?.role === 'admin'
-  const activeNav = (!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(requestedNav)) || (!isAdmin && requestedNav === 'Approvals') ? 'Overview' : requestedNav
-  const openModule = (label: string) => { const destination = ((!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(label)) || (!isAdmin && label === 'Approvals')) ? 'Overview' : label; setRequestedNav(destination); setQuery(''); setActiveFilter('All events'); if (destination === 'Notifications') setNotificationReload((value) => value + 1); window.history.pushState({}, '', `#${encodeURIComponent(destination)}`) }
+  const navItems = isAdmin ? [...baseNavItems, ['♙', 'Users'], ['⌂', 'Venues']] : baseNavItems
+  const activeNav = (!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(requestedNav)) || (!isAdmin && ['Approvals', 'Users', 'Venues'].includes(requestedNav)) ? 'Overview' : requestedNav
+  const openModule = (label: string) => { const destination = ((!canManageEvents && ['Create an event', 'Manage events', 'Insights'].includes(label)) || (!isAdmin && ['Approvals', 'Users', 'Venues'].includes(label))) ? 'Overview' : label; setRequestedNav(destination); setQuery(''); setActiveFilter('All events'); if (destination === 'Notifications') setNotificationReload((value) => value + 1); window.history.pushState({}, '', `#${encodeURIComponent(destination)}`) }
   const signOut = () => { sessionStorage.removeItem('campus-event-token'); setToken(null); setValidatedToken(null); setAccount(null); setRegistered([]); setSaved([]); setEvents([]); setNotifications([]); openModule('Overview') }
   const authLoading = Boolean(token && validatedToken !== token)
   const requestKey = `${token ?? ''}:${eventsReload}`
@@ -204,6 +207,8 @@ function App() {
       {activeNav === 'Manage events' && <ManageEvents token={token} notify={notify} onViewFeedback={setFeedbackSummaryEvent} />}
       {activeNav === 'Insights' && <Insights events={events} registered={registered} saved={saved} />}
       {activeNav === 'Approvals' && <Approvals token={token} notify={notify} />}
+      {activeNav === 'Users' && <AdminUsers token={token} currentEmail={account.email} notify={notify} />}
+      {activeNav === 'Venues' && <AdminVenues token={token} notify={notify} />}
       {activeNav === 'Notifications' && <Notifications items={notifications} loading={notificationRequest.key !== `${token}:${notificationReload}`} error={notificationRequest.key === `${token}:${notificationReload}` ? notificationRequest.error : ''} onReload={() => setNotificationReload((value) => value + 1)} onRead={markNotificationRead} onReadAll={markAllNotificationsRead} />}
       {activeNav === 'Account info' && <AccountInfo account={account} onSave={async (nextAccount) => { const result = await apiRequest<AuthUser>('/api/auth/me/preferences', { method: 'PATCH', body: JSON.stringify({ name: nextAccount.name, email: nextAccount.email, department: nextAccount.department, event_reminders_enabled: nextAccount.reminders, announcements_enabled: nextAccount.announcements }) }, token); setAccount({ name: result.data.name, email: result.data.email, department: result.data.department ?? '', role: result.data.role, reminders: result.data.event_reminders_enabled, announcements: result.data.announcements_enabled }); notify('Account information updated') }} onLogout={signOut} />}
     </motion.div></AnimatePresence></div></main><AnimatePresence>{toast && <motion.div className="toast" role="status" initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} transition={{ duration: 0.18, ease: 'easeOut' }}>{toast}<button onClick={() => setToast('')}>×</button></motion.div>}</AnimatePresence>
@@ -479,6 +484,97 @@ function Approvals({ token, notify }: { token: string; notify: (message: string)
   }
 
   return <><section className="welcome-row"><div><p className="eyebrow">Administrator tools</p><h1>Event approvals</h1><p className="welcome-copy">Review event submissions before they appear in the campus calendar.</p></div><button className="secondary-button" type="button" onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading pending submissions…</p> : pendingEvents.length === 0 ? <div className="empty-state">There are no events waiting for approval.</div> : <section className="approval-list">{pendingEvents.map((event) => <article className="approval-item" key={event.id}><div className="approval-main"><div className="approval-title"><div><span className="category-pill static-pill">{event.category}</span><span className="pending-label">Pending review</span></div><h2>{event.title}</h2></div><p>{event.description}</p><dl><div><dt>Organizer</dt><dd>{event.organizer} · {event.organizer_email}</dd></div><div><dt>When</dt><dd>{new Date(event.starts_at).toLocaleString()} to {new Date(event.ends_at).toLocaleTimeString()}</dd></div><div><dt>Venue</dt><dd>{event.venue} · {event.location}</dd></div><div><dt>Registration deadline</dt><dd>{new Date(event.registration_deadline).toLocaleString()}</dd></div><div><dt>Capacity</dt><dd>{event.capacity}</dd></div></dl></div><div className="approval-actions"><button className="approve-button" disabled={processingId !== null} onClick={() => review(event.id, 'approved')}>{processingId === event.id ? 'Saving…' : 'Approve'}</button><button className="reject-button" disabled={processingId !== null} onClick={() => review(event.id, 'rejected')}>Reject</button></div></article>)}</section>}</>
+}
+
+function AdminUsers({ token, currentEmail, notify }: { token: string; currentEmail: string; notify: (message: string) => void }) {
+  const [users, setUsers] = useState<AdminUser[]>([])
+  const [draftRoles, setDraftRoles] = useState<Record<string, string>>({})
+  const [loadedKey, setLoadedKey] = useState('')
+  const [error, setError] = useState('')
+  const [reload, setReload] = useState(0)
+  const [processingId, setProcessingId] = useState<string | null>(null)
+  const requestKey = `${token}:${reload}`
+  const loading = loadedKey !== requestKey
+
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<AdminUser[]>('/api/auth/admin/users', {}, token)
+      .then(({ data }) => { if (!cancelled) { setUsers(data); setError(''); setLoadedKey(requestKey) } })
+      .catch((requestError: Error) => { if (!cancelled) { setError(requestError.message); setLoadedKey(requestKey) } })
+    return () => { cancelled = true }
+  }, [token, requestKey])
+
+  const saveRole = async (user: AdminUser) => {
+    const role = draftRoles[String(user.id)]
+    if (!role || role === user.role) return
+    setProcessingId(String(user.id))
+    setError('')
+    try {
+      const { data } = await apiRequest<AdminUser>(`/api/auth/admin/users/${user.id}`, { method: 'PATCH', body: JSON.stringify({ role }) }, token)
+      setUsers((current) => current.map((item) => String(item.id) === String(user.id) ? data : item))
+      setDraftRoles((current) => { const next = { ...current }; delete next[String(user.id)]; return next })
+      notify(`Updated ${user.name}'s role`)
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'User role could not be updated')
+    } finally {
+      setProcessingId(null)
+    }
+  }
+
+  return <><section className="welcome-row"><div><p className="eyebrow">Administrator tools</p><h1>User management</h1><p className="welcome-copy">Assign account roles for campus staff and event organizers.</p></div><button className="secondary-button" type="button" onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading accounts…</p> : users.length === 0 ? <div className="empty-state">No accounts were found.</div> : <section className="admin-record-list">{users.map((user) => { const isCurrentUser = user.email.toLowerCase() === currentEmail.toLowerCase(); const role = draftRoles[String(user.id)] ?? user.role; return <article className="admin-record" key={user.id}><div className="admin-record-copy"><h2>{user.name}</h2><p>{user.email}</p><span>{user.department || 'No department'} · Joined {new Date(user.created_at).toLocaleDateString()}</span></div><div className="admin-record-actions"><label className="admin-role-field">Role<select value={role} disabled={isCurrentUser || processingId !== null} onChange={(event) => setDraftRoles((current) => ({ ...current, [String(user.id)]: event.target.value }))}><option value="student">Student</option><option value="faculty">Faculty</option><option value="organizer">Organizer</option><option value="admin">Administrator</option></select></label><button className="secondary-button" type="button" disabled={isCurrentUser || role === user.role || processingId !== null} onClick={() => saveRole(user)}>{processingId === String(user.id) ? 'Saving…' : 'Save role'}</button></div></article> })}</section>}</>
+}
+
+function AdminVenues({ token, notify }: { token: string; notify: (message: string) => void }) {
+  const [venues, setVenues] = useState<AdminVenue[]>([])
+  const [draft, setDraft] = useState({ name: '', location: '', capacity: 100, availability: true })
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [loadedKey, setLoadedKey] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const [reload, setReload] = useState(0)
+  const requestKey = `${token}:${reload}`
+  const loading = loadedKey !== requestKey
+
+  useEffect(() => {
+    let cancelled = false
+    apiRequest<AdminVenue[]>('/api/admin/venues', {}, token)
+      .then(({ data }) => { if (!cancelled) { setVenues(data); setError(''); setLoadedKey(requestKey) } })
+      .catch((requestError: Error) => { if (!cancelled) { setError(requestError.message); setLoadedKey(requestKey) } })
+    return () => { cancelled = true }
+  }, [token, requestKey])
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    const payload = { ...draft, name: draft.name.trim(), location: draft.location.trim(), capacity: Number(draft.capacity) }
+    try {
+      const path = editingId ? `/api/admin/venues/${editingId}` : '/api/admin/venues'
+      const method = editingId ? 'PATCH' : 'POST'
+      const { data } = await apiRequest<AdminVenue>(path, { method, body: JSON.stringify(payload) }, token)
+      setVenues((current) => editingId ? current.map((venue) => String(venue.id) === editingId ? data : venue) : [...current, data].sort((left, right) => left.name.localeCompare(right.name)))
+      setDraft({ name: '', location: '', capacity: 100, availability: true })
+      setEditingId(null)
+      notify(editingId ? 'Venue updated' : 'Venue added')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Venue could not be saved')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const toggleAvailability = async (venue: AdminVenue) => {
+    setError('')
+    try {
+      const { data } = await apiRequest<AdminVenue>(`/api/admin/venues/${venue.id}`, { method: 'PATCH', body: JSON.stringify({ ...venue, availability: !venue.availability }) }, token)
+      setVenues((current) => current.map((item) => String(item.id) === String(venue.id) ? data : item))
+      notify(data.availability ? 'Venue is available for new events' : 'Venue marked unavailable')
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Venue availability could not be changed')
+    }
+  }
+
+  return <><section className="welcome-row"><div><p className="eyebrow">Administrator tools</p><h1>Venue management</h1><p className="welcome-copy">Maintain campus event spaces, capacities, and booking availability.</p></div><button className="secondary-button" type="button" onClick={() => setReload((value) => value + 1)} disabled={loading}>Refresh</button></section>{error && <div className="api-alert" role="alert">{error}<button type="button" onClick={() => setReload((value) => value + 1)}>Retry</button></div>}<form className="event-form admin-venue-form" onSubmit={submit}><h2>{editingId ? 'Edit venue' : 'Add venue'}</h2><label>Venue name<input value={draft.name} onChange={(event) => setDraft((current) => ({ ...current, name: event.target.value }))} required minLength={2} maxLength={120} /></label><label>Location<input value={draft.location} onChange={(event) => setDraft((current) => ({ ...current, location: event.target.value }))} required minLength={2} maxLength={240} /></label><label>Maximum capacity<input type="number" min="1" max="50000" value={draft.capacity} onChange={(event) => setDraft((current) => ({ ...current, capacity: Number(event.target.value) }))} required /></label>{editingId && <label className="admin-availability-field"><input type="checkbox" checked={draft.availability} onChange={(event) => setDraft((current) => ({ ...current, availability: event.target.checked }))} /> Available for new events</label>}<div className="managed-actions"><button className="primary-button" type="submit" disabled={saving}>{saving ? 'Saving…' : editingId ? 'Save venue' : 'Add venue'}</button>{editingId && <button className="secondary-button" type="button" onClick={() => { setEditingId(null); setDraft({ name: '', location: '', capacity: 100, availability: true }) }}>Cancel</button>}</div></form>{loading ? <p className="api-status" role="status">Loading venues…</p> : venues.length === 0 ? <div className="empty-state">No venues have been added.</div> : <section className="admin-record-list">{venues.map((venue) => <article className="admin-record" key={venue.id}><div className="admin-record-copy"><h2>{venue.name}</h2><p>{venue.location} · Capacity {venue.capacity}</p><span className={venue.availability ? 'venue-status available' : 'venue-status unavailable'}>{venue.availability ? 'Available' : 'Unavailable'}</span></div><div className="admin-record-actions"><button className="secondary-button" type="button" onClick={() => { setEditingId(String(venue.id)); setDraft(venue) }}>Edit</button><button className="secondary-button" type="button" disabled={editingId === String(venue.id)} onClick={() => toggleAvailability(venue)}>{venue.availability ? 'Mark unavailable' : 'Make available'}</button></div></article>)}</section>}</>
 }
 
 function EventGrid({ events, registered, confirmed, saved, onRegister, onSave, onShowPass, onFeedback, now }: { events: EventItem[]; registered: number[]; confirmed: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void; onFeedback: (event: EventItem) => void; now: number }) {

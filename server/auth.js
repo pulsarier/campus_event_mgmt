@@ -241,9 +241,39 @@ export function createAuthRouter(pool, jwtSecret) {
   })
   router.get('/admin/users', authenticate, authorize('admin'), async (_request, response) => {
     const result = await pool.query(
-      'SELECT user_id, name, email, role, department, created_at FROM users ORDER BY created_at DESC',
+      'SELECT user_id AS id, name, email, role, department, created_at FROM users ORDER BY created_at DESC',
     )
     return response.json({ data: result.rows })
+  })
+
+  router.patch('/admin/users/:userId', authenticate, authorize('admin'), async (request, response) => {
+    const userId = Number(request.params.userId)
+    const role = request.body?.role
+    if (!Number.isSafeInteger(userId) || userId < 1) return response.status(400).json({ error: 'Invalid user ID' })
+    if (!roles.has(role)) return response.status(400).json({ error: 'Select a valid account role' })
+    if (String(request.user.user_id) === String(userId)) {
+      return response.status(409).json({ error: 'You cannot change your own role' })
+    }
+    if (role === 'student') {
+      const managedEvents = await pool.query(
+        `SELECT 1 FROM events
+          WHERE organizer_id = $1 AND status IN ('pending', 'approved')
+            AND ends_at > now()
+          LIMIT 1`,
+        [userId],
+      )
+      if (managedEvents.rowCount > 0) {
+        return response.status(409).json({ error: 'This user has active events and cannot be changed to a student role' })
+      }
+    }
+    const result = await pool.query(
+      `UPDATE users SET role = $2
+        WHERE user_id = $1
+        RETURNING user_id AS id, name, email, role, department, created_at`,
+      [userId, role],
+    )
+    if (result.rowCount !== 1) return response.status(404).json({ error: 'User not found' })
+    return response.json({ data: result.rows[0] })
   })
 
   return router
