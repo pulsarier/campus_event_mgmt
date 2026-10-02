@@ -707,8 +707,9 @@ app.post('/api/events/:eventId/registrations', authenticate, authorize('student'
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    await client.query('SELECT user_id FROM users WHERE user_id = $1 FOR UPDATE', [request.user.user_id])
     const eventResult = await client.query(
-      'SELECT event_id, capacity, registration_deadline FROM events WHERE event_id = $1 AND status = $2 FOR UPDATE',
+      'SELECT event_id, title, category, starts_at, ends_at, capacity, registration_deadline FROM events WHERE event_id = $1 AND status = $2 FOR UPDATE',
       [eventId, 'approved'],
     )
     if (eventResult.rowCount !== 1) { await client.query('ROLLBACK'); return response.status(404).json({ error: 'Event not found' }) }
@@ -722,6 +723,49 @@ app.post('/api/events/:eventId/registrations', authenticate, authorize('student'
     if (existing.rowCount === 1 && existing.rows[0].status !== 'cancelled') {
       await client.query('ROLLBACK')
       return response.status(409).json({ error: 'You are already registered for this event' })
+    }
+
+    const conflicts = await client.query(
+      `SELECT e.event_id AS id, e.title, e.starts_at, e.ends_at
+         FROM registrations r
+         JOIN events e ON e.event_id = r.event_id
+        WHERE r.user_id = $1 AND r.status = 'confirmed'
+          AND e.status = 'approved' AND e.event_id <> $2
+          AND e.starts_at < $4 AND e.ends_at > $3
+        ORDER BY e.starts_at`,
+      [request.user.user_id, eventId, event.starts_at, event.ends_at],
+    )
+    if (conflicts.rowCount > 0) {
+      const alternatives = await client.query(
+        `SELECT e.event_id AS id, e.title, e.category, e.starts_at, e.ends_at,
+                v.venue_name AS venue
+           FROM events e
+           JOIN venues v ON v.venue_id = e.venue_id
+          WHERE e.status = 'approved' AND e.category = $2 AND e.event_id <> $3
+            AND e.starts_at > now() AND e.registration_deadline >= now()
+            AND NOT EXISTS (
+              SELECT 1 FROM registrations r
+               WHERE r.event_id = e.event_id AND r.user_id = $1
+                 AND r.status <> 'cancelled'
+            )
+            AND (SELECT COUNT(*) FROM registrations r
+                  WHERE r.event_id = e.event_id AND r.status = 'confirmed') < e.capacity
+            AND NOT EXISTS (
+              SELECT 1 FROM registrations r
+              JOIN events booked ON booked.event_id = r.event_id
+               WHERE r.user_id = $1 AND r.status = 'confirmed'
+                 AND booked.status = 'approved'
+                 AND booked.starts_at < e.ends_at AND booked.ends_at > e.starts_at
+            )
+          ORDER BY ABS(EXTRACT(EPOCH FROM (e.starts_at - $4::TIMESTAMPTZ))), e.starts_at
+          LIMIT 3`,
+        [request.user.user_id, event.category, eventId, event.starts_at],
+      )
+      await client.query('ROLLBACK')
+      return response.status(409).json({
+        error: `This event overlaps with ${conflicts.rows.map((conflict) => conflict.title).join(', ')}`,
+        data: { conflicts: conflicts.rows, alternatives: alternatives.rows },
+      })
     }
 
     const confirmed = await client.query(

@@ -21,6 +21,19 @@ type AttendanceReport = { id: number; title: string; confirmed_count: number; at
 type PendingEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; venue: string; location: string; organizer: string; organizer_email: string }
 type ManagedEvent = { id: number; title: string; description: string; category: string; starts_at: string; ends_at: string; registration_deadline: string; capacity: number; status: string; venue_id: number; venue: string; location: string; participant_count: number }
 type ApiResult<T> = { data: T; token?: string; error?: string }
+type RegistrationConflict = {
+  conflicts: Array<{ id: number | string; title: string; starts_at: string; ends_at: string }>
+  alternatives: Array<{ id: number | string; title: string; category: string; starts_at: string; ends_at: string; venue: string }>
+}
+
+class ApiError extends Error {
+  data: unknown
+
+  constructor(message: string, data: unknown) {
+    super(message)
+    this.data = data
+  }
+}
 const apiBase = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:3001'
 const fallbackImage = 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1000&q=80'
 
@@ -34,7 +47,7 @@ async function apiRequest<T>(path: string, options: RequestInit = {}, token?: st
     },
   })
   const result = await response.json().catch(() => ({})) as ApiResult<T>
-  if (!response.ok) throw new Error(result.error ?? 'The request could not be completed')
+  if (!response.ok) throw new ApiError(result.error ?? 'The request could not be completed', result.data)
   return result
 }
 
@@ -86,6 +99,7 @@ function App() {
   const [attendancePassEvent, setAttendancePassEvent] = useState<EventItem | null>(null)
   const [feedbackEvent, setFeedbackEvent] = useState<EventItem | null>(null)
   const [feedbackSummaryEvent, setFeedbackSummaryEvent] = useState<ManagedEvent | null>(null)
+  const [registrationConflict, setRegistrationConflict] = useState<RegistrationConflict | null>(null)
   useEffect(() => { const syncModule = () => setRequestedNav(moduleFromHash()); window.addEventListener('hashchange', syncModule); window.addEventListener('popstate', syncModule); return () => { window.removeEventListener('hashchange', syncModule); window.removeEventListener('popstate', syncModule) } }, [])
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 60000); return () => window.clearInterval(timer) }, [])
   useEffect(() => {
@@ -146,7 +160,27 @@ function App() {
       setRegistered(result.data.map((item) => Number(item.id)))
       setConfirmedRegistrations(result.data.filter((item) => item.status === 'confirmed').map((item) => Number(item.id)))
       setEventsReload((value) => value + 1)
-    } catch (error) { notify(error instanceof Error ? error.message : 'Registration could not be updated') }
+    } catch (error) {
+      if (error instanceof ApiError && error.data && typeof error.data === 'object' && 'conflicts' in error.data && 'alternatives' in error.data) {
+        setRegistrationConflict(error.data as RegistrationConflict)
+      } else notify(error instanceof Error ? error.message : 'Registration could not be updated')
+    }
+  }
+  const registerAlternative = async (event: RegistrationConflict['alternatives'][number]) => {
+    if (!token) return
+    try {
+      const result = await apiRequest<{ status: string }>(`/api/events/${event.id}/registrations`, { method: 'POST', body: JSON.stringify({}) }, token)
+      const registrationsResult = await apiRequest<ApiListItem[]>('/api/registrations/me', {}, token)
+      setRegistered(registrationsResult.data.map((item) => Number(item.id)))
+      setConfirmedRegistrations(registrationsResult.data.filter((item) => item.status === 'confirmed').map((item) => Number(item.id)))
+      setEventsReload((value) => value + 1)
+      setRegistrationConflict(null)
+      notify(result.data.status === 'waitlisted' ? `Added to the waitlist for ${event.title}` : `Registered for ${event.title}`)
+    } catch (error) {
+      if (error instanceof ApiError && error.data && typeof error.data === 'object' && 'conflicts' in error.data && 'alternatives' in error.data) {
+        setRegistrationConflict(error.data as RegistrationConflict)
+      } else notify(error instanceof Error ? error.message : 'Alternative registration could not be completed')
+    }
   }
   const toggleSaved = async (event: EventItem) => {
     if (!token) return
@@ -212,7 +246,7 @@ function App() {
       {activeNav === 'Notifications' && <Notifications items={notifications} loading={notificationRequest.key !== `${token}:${notificationReload}`} error={notificationRequest.key === `${token}:${notificationReload}` ? notificationRequest.error : ''} onReload={() => setNotificationReload((value) => value + 1)} onRead={markNotificationRead} onReadAll={markAllNotificationsRead} />}
       {activeNav === 'Account info' && <AccountInfo account={account} onSave={async (nextAccount) => { const result = await apiRequest<AuthUser>('/api/auth/me/preferences', { method: 'PATCH', body: JSON.stringify({ name: nextAccount.name, email: nextAccount.email, department: nextAccount.department, event_reminders_enabled: nextAccount.reminders, announcements_enabled: nextAccount.announcements }) }, token); setAccount({ name: result.data.name, email: result.data.email, department: result.data.department ?? '', role: result.data.role, reminders: result.data.event_reminders_enabled, announcements: result.data.announcements_enabled }); notify('Account information updated') }} onLogout={signOut} />}
     </motion.div></AnimatePresence></div></main><AnimatePresence>{toast && <motion.div className="toast" role="status" initial={{ opacity: 0, y: 12, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.98 }} transition={{ duration: 0.18, ease: 'easeOut' }}>{toast}<button onClick={() => setToast('')}>×</button></motion.div>}</AnimatePresence>
-  </div>{attendancePassEvent && <AttendancePassModal event={attendancePassEvent} token={token} onClose={() => setAttendancePassEvent(null)} />}{feedbackEvent && <FeedbackModal event={feedbackEvent} token={token} onClose={() => setFeedbackEvent(null)} onSubmitted={() => setEventsReload((value) => value + 1)} />}{feedbackSummaryEvent && <FeedbackSummaryModal event={feedbackSummaryEvent} token={token} onClose={() => setFeedbackSummaryEvent(null)} />}</MotionConfig>
+  </div>{attendancePassEvent && <AttendancePassModal event={attendancePassEvent} token={token} onClose={() => setAttendancePassEvent(null)} />}{feedbackEvent && <FeedbackModal event={feedbackEvent} token={token} onClose={() => setFeedbackEvent(null)} onSubmitted={() => setEventsReload((value) => value + 1)} />}{feedbackSummaryEvent && <FeedbackSummaryModal event={feedbackSummaryEvent} token={token} onClose={() => setFeedbackSummaryEvent(null)} />}{registrationConflict && <RegistrationConflictModal data={registrationConflict} onClose={() => setRegistrationConflict(null)} onSelect={registerAlternative} />}</MotionConfig>
 }
 
 function Overview({ name, allowCreate, events, registered, confirmed, saved, onRegister, onSave, onShowPass, onFeedback, now, onDiscover, onCreate }: { name: string; allowCreate: boolean; events: EventItem[]; registered: number[]; confirmed: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void; onFeedback: (event: EventItem) => void; now: number; onDiscover: () => void; onCreate: () => void }) {
@@ -283,6 +317,18 @@ function Notifications({ items, loading, error, onReload, onRead, onReadAll }: {
   const unreadCount = items.filter((item) => !item.is_read).length
   const typeLabels: Record<string, string> = { event_update: 'Event update', event_cancelled: 'Cancellation', event_approval: 'Approval update', event_reminder: 'Event reminder', system: 'Notification' }
   return <><section className="welcome-row"><div><p className="eyebrow">Your activity</p><h1>Notifications</h1><p className="welcome-copy">Event updates, approvals, and reminders for your account.</p></div><div className="notification-actions"><button className="secondary-button" type="button" onClick={onReload} disabled={loading}>Refresh</button><button className="secondary-button" type="button" onClick={onReadAll} disabled={loading || unreadCount === 0}>Mark all read</button></div></section>{error && <div className="api-alert" role="alert">Notifications couldn’t be loaded: {error}<button type="button" onClick={onReload}>Retry</button></div>}{loading ? <p className="api-status" role="status">Loading notifications…</p> : items.length === 0 ? <div className="empty-state">You have no notifications.</div> : <section className="notification-list">{items.map((item) => <article key={item.id} className={item.is_read ? 'notification-item read' : 'notification-item unread'}><span className="notification-mark" aria-hidden="true">{item.notification_type === 'event_reminder' ? '◷' : item.notification_type === 'event_cancelled' ? '!' : '•'}</span><div className="notification-copy"><div className="notification-meta"><span>{typeLabels[item.notification_type] ?? 'Notification'}</span><time dateTime={item.created_at}>{new Date(item.created_at).toLocaleString()}</time></div><p>{item.message}</p></div>{!item.is_read && <button className="mark-read" type="button" onClick={() => onRead(item.id)}>Mark read</button>}</article>)}</section>}</>
+}
+
+function RegistrationConflictModal({ data, onClose, onSelect }: { data: RegistrationConflict; onClose: () => void; onSelect: (event: RegistrationConflict['alternatives'][number]) => void }) {
+  return <div className="modal-backdrop" onClick={onClose}><section className="attendance-modal registration-conflict-modal" role="dialog" aria-modal="true" aria-labelledby="registration-conflict-title" onClick={(event) => event.stopPropagation()}>
+    <button className="modal-close" type="button" aria-label="Close schedule conflict" onClick={onClose}>×</button>
+    <p className="eyebrow">Registration conflict</p>
+    <h2 id="registration-conflict-title">This event overlaps your schedule</h2>
+    <p className="pass-event-title">You’re already confirmed for an event during this time:</p>
+    <div className="conflict-list">{data.conflicts.map((event) => <article className="conflict-item" key={event.id}><strong>{event.title}</strong><span>{new Date(event.starts_at).toLocaleString()} – {new Date(event.ends_at).toLocaleTimeString()}</span></article>)}</div>
+    <h3>Other events that fit your schedule</h3>
+    {data.alternatives.length === 0 ? <p className="api-status">No open events in this category currently fit your schedule.</p> : <div className="conflict-list">{data.alternatives.map((event) => <article className="conflict-item conflict-alternative" key={event.id}><div><strong>{event.title}</strong><span>{event.category} · {new Date(event.starts_at).toLocaleString()} · {event.venue}</span></div><button className="secondary-button" type="button" onClick={() => onSelect(event)}>Register</button></article>)}</div>}
+  </section></div>
 }
 
 function FeedbackModal({ event, token, onClose, onSubmitted }: { event: EventItem; token: string; onClose: () => void; onSubmitted: () => void }) {
