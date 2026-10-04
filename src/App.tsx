@@ -272,8 +272,29 @@ function App() {
 }
 
 function Overview({ token, canRegister, refreshKey, name, allowCreate, events, registered, confirmed, attended, saved, onRegister, onSave, onShowPass, onFeedback, onCertificate, now, onDiscover, onCreate }: { token: string; canRegister: boolean; refreshKey: string; name: string; allowCreate: boolean; events: EventItem[]; registered: number[]; confirmed: number[]; attended: number[]; saved: number[]; onRegister: (event: EventItem) => void; onSave: (event: EventItem) => void; onShowPass: (event: EventItem) => void; onFeedback: (event: EventItem) => void; onCertificate: (event: EventItem) => void; now: number; onDiscover: () => void; onCreate: () => void }) {
+  const reveal = { hidden: { opacity: 0, y: 14 }, visible: { opacity: 1, y: 0, transition: { duration: 0.36, ease: 'easeOut' as const } } }
+  const statReveal = { hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0, transition: { duration: 0.28, ease: 'easeOut' as const } } }
   const featured = events[0]
-  return <><section className="welcome-row"><div><p className="eyebrow">Campus events</p><h1>Welcome, {name.split(' ')[0]}</h1><p className="welcome-copy">Find events, register, and keep your campus schedule in one place.</p></div>{allowCreate && <button className="primary-button" onClick={onCreate}><span>＋</span> Create an event</button>}</section>{featured ? <section className="hero-banner"><div className="hero-copy"><span className="tag">Featured event</span><h2>{featured.title}</h2><p>{featured.date} · {featured.venue}</p><button className="text-button" onClick={onDiscover}>View all events <span>↗</span></button></div><div className="hero-stat"><strong>{events.length}</strong><span>published events</span></div></section> : <div className="empty-state">No approved events are available yet.</div>}<section className="stats-row"><div className="stat-card"><div className="stat-icon green">◷</div><div><span>My upcoming</span><strong>{String(registered.length).padStart(2, '0')} <small>events</small></strong></div></div><div className="stat-card"><div className="stat-icon yellow">♢</div><div><span>Saved events</span><strong>{String(saved.length).padStart(2, '0')} <small>to revisit</small></strong></div></div><div className="stat-card"><div className="stat-icon blue">✦</div><div><span>Campus events</span><strong>{events.length} <small>published</small></strong></div></div></section><RecommendedEvents token={token} canRegister={canRegister} refreshKey={refreshKey} onRegister={onRegister} /><section className="section-heading"><div><h2>Happening around campus</h2><p>Discover something worth showing up for.</p></div><button className="view-link" onClick={onDiscover}>View all events <span>↗</span></button></section>{events.length > 0 && <EventGrid events={events.slice(0, 3)} registered={registered} confirmed={confirmed} attended={attended} saved={saved} onRegister={onRegister} onSave={onSave} onShowPass={onShowPass} onFeedback={onFeedback} onCertificate={onCertificate} now={now} />}</>
+  return <>
+    <motion.section className="welcome-row" initial="hidden" whileInView="visible" viewport={{ once: true, amount: 0.2 }} variants={reveal}>
+      <div><p className="eyebrow">Campus events</p><h1>Welcome, {name.split(' ')[0]}</h1><p className="welcome-copy">Find events, register, and keep your campus schedule in one place.</p></div>
+      {allowCreate && <button className="primary-button" onClick={onCreate}><span>＋</span> Create an event</button>}
+    </motion.section>
+    {featured ? <motion.section className="hero-banner" initial="hidden" whileInView="visible" viewport={{ once: true, amount: 0.2 }} variants={reveal}>
+      <div className="hero-copy"><span className="tag">Featured event</span><h2>{featured.title}</h2><p>{featured.date} · {featured.venue}</p><button className="text-button" onClick={onDiscover}>View all events <span>↗</span></button></div>
+      <div className="hero-stat"><strong>{events.length}</strong><span>published events</span></div>
+    </motion.section> : <motion.div className="empty-state" initial="hidden" whileInView="visible" viewport={{ once: true, amount: 0.2 }} variants={reveal}>No approved events are available yet.</motion.div>}
+    <motion.section className="stats-row" initial="hidden" whileInView="visible" viewport={{ once: true, amount: 0.2 }} variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.07 } } }}>
+      <motion.div className="stat-card" variants={statReveal}><div className="stat-icon green">◷</div><div><span>My upcoming</span><strong>{String(registered.length).padStart(2, '0')} <small>events</small></strong></div></motion.div>
+      <motion.div className="stat-card" variants={statReveal}><div className="stat-icon yellow">♢</div><div><span>Saved events</span><strong>{String(saved.length).padStart(2, '0')} <small>to revisit</small></strong></div></motion.div>
+      <motion.div className="stat-card" variants={statReveal}><div className="stat-icon blue">✦</div><div><span>Campus events</span><strong>{events.length} <small>published</small></strong></div></motion.div>
+    </motion.section>
+    <RecommendedEvents token={token} canRegister={canRegister} refreshKey={refreshKey} onRegister={onRegister} />
+    <motion.section className="section-heading" initial="hidden" whileInView="visible" viewport={{ once: true, amount: 0.2 }} variants={reveal}>
+      <div><h2>Happening around campus</h2><p>Discover something worth showing up for.</p></div><button className="view-link" onClick={onDiscover}>View all events <span>↗</span></button>
+    </motion.section>
+    {events.length > 0 && <EventGrid events={events.slice(0, 3)} registered={registered} confirmed={confirmed} attended={attended} saved={saved} onRegister={onRegister} onSave={onSave} onShowPass={onShowPass} onFeedback={onFeedback} onCertificate={onCertificate} now={now} />}
+  </>
 }
 
 function RecommendedEvents({ token, canRegister, refreshKey, onRegister }: { token: string; canRegister: boolean; refreshKey: string; onRegister: (event: EventItem) => void }) {
