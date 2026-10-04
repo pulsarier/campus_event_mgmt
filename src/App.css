@@ -134,3 +134,12 @@ html, body { background: #0d1410; color: #e7efe8; }
 .attendance-camera { background: #0f1712; border-color: #35483b; }.attendance-report { border-color: #304238; }.attendance-report-heading h3 { color: #dce8df; }.attendance-report-heading span, .attendance-report li, .attendance-report li span:last-child { color: #b3c2b7; }.attendance-report li { border-color: #304238; }.scanner-hint { color: #a2b1a6; }
 .day-block { background: #233a2a; }.day-block strong { color: #aee0b8; }.day-block span { color: #a1b6a6; }.week-item { border-color: #304238; }.week-info strong { color: #d9e6dc; }.week-info span { color: #9eafa3; }.confirmed { background: #223a29; color: #aee1b8; }
 ::selection { background: #8dd79d; color: #101b13; }
+.avatar, .user-avatar, .large-avatar { overflow: hidden; font-size: 0; }
+.avatar::before, .user-avatar::before, .large-avatar::before { content: ""; display: block; width: 66%; aspect-ratio: 1; background: currentColor; -webkit-mask: url("/default-avatar.svg") center / contain no-repeat; mask: url("/default-avatar.svg") center / contain no-repeat; }
+.sidebar-collapsed .sidebar { position: sticky; top: 0; align-self: flex-start; height: 100vh; overflow-x: hidden; overflow-y: auto; }
+.stat-card-button { width: 100%; appearance: none; text-align: left; color: inherit; }
+.stat-card-button:hover { border-color: #78a988; }
+.stat-card-button:focus-visible { outline: 2px solid #67a47e; outline-offset: 3px; }
+.back-button { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; display: grid; place-items: center; background: transparent; color: #a2b1a6; font-size: 20px; }
+.back-button:hover { background: #1c3022; color: #c4ebcd; }
+.back-button:focus-visible { outline: 2px solid #67a47e; outline-offset: 2px; }
