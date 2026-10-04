@@ -143,3 +143,5 @@ html, body { background: #0d1410; color: #e7efe8; }
 .back-button { width: 30px; height: 30px; padding: 0; border: 0; border-radius: 5px; display: grid; place-items: center; background: transparent; color: #a2b1a6; font-size: 20px; }
 .back-button:hover { background: #1c3022; color: #c4ebcd; }
 .back-button:focus-visible { outline: 2px solid #67a47e; outline-offset: 2px; }
+.account-header .large-avatar { display: grid; place-items: center; }
+.brand-mark, .auth-brand span { display: inline-block; width: 26px; height: 26px; flex: 0 0 26px; overflow: hidden; color: transparent; font-size: 0; line-height: 0; background: url("/black-hole.svg") center / contain no-repeat; }
