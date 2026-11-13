@@ -5,6 +5,7 @@ import pg from 'pg'
 import jwt from 'jsonwebtoken'
 import PDFDocument from 'pdfkit'
 import { createAccessControl, createAuthRouter } from './auth.js'
+import { validateEventInput } from './event-validation.js'
 import { sendRegisteredNotificationEmails, sendUserNotificationEmail } from './mailer.js'
 import { startReminderScheduler } from './reminders.js'
 
@@ -283,32 +284,16 @@ app.get('/api/recommendations/me', authenticate, async (request, response) => {
 })
 
 app.post('/api/events', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
-  const { title, description = '', category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
-  const cleanTitle = typeof title === 'string' ? title.trim() : ''
-  const cleanDescription = typeof description === 'string' ? description.trim() : null
-  const allowedCategories = new Set(['Talks', 'Workshops', 'Sports', 'Exhibitions'])
-  const startDate = new Date(startsAt)
-  const endDate = new Date(endsAt)
-  const deadlineDate = new Date(deadline)
-  const numericVenueId = Number(venueId)
-  const numericCapacity = Number(capacity)
-
-  if (cleanTitle.length < 3 || cleanTitle.length > 180) return response.status(400).json({ error: 'Title must be between 3 and 180 characters' })
-  if (cleanDescription === null || cleanDescription.length > 10000) return response.status(400).json({ error: 'Description must be 10000 characters or fewer' })
-  if (!allowedCategories.has(category)) return response.status(400).json({ error: 'Invalid event category' })
-  if (![startDate, endDate, deadlineDate].every((date) => Number.isFinite(date.getTime())) || endDate <= startDate || deadlineDate > startDate) {
-    return response.status(400).json({ error: 'Provide valid event times and a registration deadline no later than the start time' })
-  }
-  if (!Number.isSafeInteger(numericVenueId) || numericVenueId < 1 || !Number.isSafeInteger(numericCapacity) || numericCapacity < 1) {
-    return response.status(400).json({ error: 'Select a valid venue and positive event capacity' })
-  }
+  const validated = validateEventInput(request.body)
+  if (validated.error) return response.status(400).json({ error: validated.error })
+  const { title, description, category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = validated.value
 
   const result = await pool.query(
     `INSERT INTO events (title, description, category, starts_at, ends_at, registration_deadline, venue_id, organizer_id, capacity, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
      RETURNING event_id AS id, title, description, category, starts_at, ends_at,
                registration_deadline, venue_id AS venue_id, capacity, status`,
-    [cleanTitle, cleanDescription, category, startDate.toISOString(), endDate.toISOString(), deadlineDate.toISOString(), numericVenueId, request.user.user_id, numericCapacity],
+    [title, description, category, startsAt, endsAt, deadline, venueId, request.user.user_id, capacity],
   )
   response.status(201).json({ data: result.rows[0] })
 })
@@ -365,21 +350,15 @@ app.get('/api/analytics/me', authenticate, authorize('faculty', 'organizer', 'ad
 
 app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'organizer', 'admin'), async (request, response) => {
   const eventId = Number(request.params.eventId)
-  const { title, description, category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = request.body ?? {}
-  const cleanTitle = typeof title === 'string' ? title.trim() : ''
-  const cleanDescription = typeof description === 'string' ? description.trim() : null
-  const allowedCategories = new Set(['Talks', 'Workshops', 'Sports', 'Exhibitions'])
+  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
+  const validated = validateEventInput(request.body, { requireDescription: true })
+  if (validated.error) return response.status(400).json({ error: validated.error })
+  const { title, description, category, starts_at: startsAt, ends_at: endsAt, registration_deadline: deadline, venue_id: venueId, capacity } = validated.value
   const startDate = new Date(startsAt)
   const endDate = new Date(endsAt)
-  const deadlineDate = new Date(deadline)
-  const numericVenueId = Number(venueId)
-  const numericCapacity = Number(capacity)
-  if (!Number.isSafeInteger(eventId) || eventId < 1) return response.status(400).json({ error: 'Invalid event ID' })
-  if (cleanTitle.length < 3 || cleanTitle.length > 180) return response.status(400).json({ error: 'Title must be between 3 and 180 characters' })
-  if (cleanDescription === null || cleanDescription.length > 10000) return response.status(400).json({ error: 'Description must be 10000 characters or fewer' })
-  if (!allowedCategories.has(category)) return response.status(400).json({ error: 'Invalid event category' })
-  if (![startDate, endDate, deadlineDate].every((date) => Number.isFinite(date.getTime())) || endDate <= startDate || deadlineDate > startDate) return response.status(400).json({ error: 'Provide valid event times and a registration deadline no later than the start time' })
-  if (!Number.isSafeInteger(numericVenueId) || numericVenueId < 1 || !Number.isSafeInteger(numericCapacity) || numericCapacity < 1) return response.status(400).json({ error: 'Select a valid venue and positive event capacity' })
+  const numericVenueId = venueId
+  const numericCapacity = capacity
+  const cleanTitle = title
 
   const client = await pool.connect()
   try {
@@ -420,7 +399,7 @@ app.patch('/api/managed-events/:eventId', authenticate, authorize('faculty', 'or
         WHERE event_id = $1
         RETURNING event_id AS id, title, description, category, starts_at,
                   ends_at, registration_deadline, venue_id, capacity, status`,
-      [eventId, cleanTitle, cleanDescription, category, startDate.toISOString(), endDate.toISOString(), deadlineDate.toISOString(), numericVenueId, numericCapacity],
+      [eventId, title, description, category, startsAt, endsAt, deadline, venueId, capacity],
     )
     if (scheduleChanged) {
       await client.query(
@@ -599,10 +578,10 @@ app.get('/api/events/:eventId/feedback', authenticate, async (request, response)
                 AND r.status = 'confirmed'
             ) AS is_attendee
        FROM events e
-      WHERE e.event_id = $1`,
+      WHERE e.event_id = $1 AND e.status = 'approved'`,
     [eventId, request.user.user_id],
   )
-  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found or feedback is unavailable' })
 
   const event = eventResult.rows[0]
   const authorized = request.user.role === 'admin' || String(event.organizer_id) === String(request.user.user_id) || event.is_attendee
@@ -701,10 +680,10 @@ app.get('/api/managed-events/:eventId/feedback', authenticate, authorize('facult
   const eventResult = await pool.query(
     `SELECT event_id AS id, title, organizer_id
        FROM events
-      WHERE event_id = $1`,
+      WHERE event_id = $1 AND status = 'approved'`,
     [eventId],
   )
-  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+  if (eventResult.rowCount !== 1) return response.status(404).json({ error: 'Event not found or feedback is unavailable' })
 
   const event = eventResult.rows[0]
   if (request.user.role !== 'admin' && String(event.organizer_id) !== String(request.user.user_id)) {
@@ -907,11 +886,11 @@ app.get('/api/managed-events/:eventId/attendance', authenticate, authorize('facu
        FROM events e
        LEFT JOIN registrations r ON r.event_id = e.event_id AND r.status = 'confirmed'
        LEFT JOIN attendance a ON a.event_id = e.event_id AND a.user_id = r.user_id AND a.status = 'present'
-      WHERE e.event_id = $1 AND ($2::BOOLEAN OR e.organizer_id = $3)
+      WHERE e.event_id = $1 AND e.status = 'approved' AND ($2::BOOLEAN OR e.organizer_id = $3)
       GROUP BY e.event_id`,
     [eventId, request.user.role === 'admin', request.user.user_id],
   )
-  if (result.rowCount !== 1) return response.status(404).json({ error: 'Event not found' })
+  if (result.rowCount !== 1) return response.status(404).json({ error: 'Event not found or attendance is unavailable' })
   const participants = await pool.query(
     `SELECT u.user_id AS id, u.name, u.email, a.marked_at,
             CASE WHEN a.attendance_id IS NULL THEN false ELSE true END AS attended

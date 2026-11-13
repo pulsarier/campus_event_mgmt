@@ -1,7 +1,8 @@
-:root { font-family: 'DM Sans', 'Segoe UI', sans-serif; color: #e8efe9; background: #0d1410; color-scheme: dark; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+:root { font-family: 'DM Sans', 'Segoe UI', sans-serif; color: #243437; background: #f4f6f5; color-scheme: light; font-synthesis: none; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; background: #0d1410; }
-body { margin: 0; min-width: 320px; background: #0d1410; color: #e8efe9; }
+html { scroll-behavior: smooth; background: #f4f6f5; }
+body { margin: 0; min-width: 320px; background: #f4f6f5; color: #243437; }
 button, input { font: inherit; }
 button { cursor: pointer; }
+:focus-visible { outline: 3px solid #4d9a94; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
